@@ -12,11 +12,26 @@ services:
       context: ./frontend
     ports:
       - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - certbot_certs:/etc/letsencrypt:ro
+      - certbot_www:/var/www/certbot:ro
     depends_on:
       backend:
         condition: service_healthy
     networks:
       - workflow-net
+    restart: unless-stopped
+
+  # ── Certbot (renovación automática cada 12h) ──────────────────────────────
+  certbot:
+    image: certbot/certbot:latest
+    volumes:
+      - certbot_certs:/etc/letsencrypt
+      - certbot_www:/var/www/certbot
+    entrypoint: /bin/sh -c "trap exit TERM; while :; do certbot renew --webroot --webroot-path /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
     restart: unless-stopped
 
   # ── Spring Boot ───────────────────────────────────────────────────────────
@@ -86,3 +101,5 @@ services:
 volumes:
   backend_uploads:
   tf_models:
+  certbot_certs:
+  certbot_www:
