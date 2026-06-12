@@ -32,10 +32,12 @@ services:
       AI_BASE_URL:           http://ia:5000
       TF_BASE_URL:           http://tf:8001
       CLAUDE_API_KEY:        ${CLAUDE_API_KEY}
-      AWS_ACCESS_KEY_ID:     ${AWS_ACCESS_KEY_ID:-}
-      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
-      AWS_REGION:            ${AWS_REGION:-us-east-2}
-      AWS_BUCKET_NAME:       ${AWS_BUCKET_NAME:-}
+      AWS_ACCESS_KEY_ID:       ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY:   ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_REGION:              ${AWS_REGION:-us-east-2}
+      AWS_BUCKET_NAME:         ${AWS_BUCKET_NAME:-}
+      AWS_KEY_PREFIX:          ${AWS_KEY_PREFIX:-tramites}
+      FIREBASE_SERVICE_ACCOUNT: ${FIREBASE_SERVICE_ACCOUNT:-}
     volumes:
       - backend_uploads:/app/uploads
     healthcheck:
