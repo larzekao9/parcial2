@@ -1,0 +1,16 @@
+# Secrets — nunca commitear
+.env
+.env.*
+!.env.example
+
+# Logs y archivos temporales
+*.log
+frontend.log
+backend_out.txt
+
+# Mobile (fuera del scope de este repo)
+sw1mobile/
+
+# OS
+.DS_Store
+Thumbs.db
