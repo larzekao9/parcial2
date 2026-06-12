@@ -38,8 +38,8 @@ services:
   backend:
     build:
       context: ./backend
-    expose:
-      - "8080"
+    ports:
+      - "8080:8080"
     environment:
       MONGODB_URI:           ${MONGODB_URI}
       JWT_SECRET:            ${JWT_SECRET}
