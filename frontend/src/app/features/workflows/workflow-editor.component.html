@@ -1,0 +1,646 @@
+﻿    <div class="min-h-full bg-[#0d1b2e] p-6">
+      <div class="flex flex-col gap-[18px]">
+        <header class="flex flex-col gap-4 xl:flex-row xl:items-start xl:justify-between">
+          <div class="flex items-start gap-3">
+            <button mat-icon-button (click)="goBack()"><mat-icon>arrow_back</mat-icon></button>
+            <div>
+              <div class="text-[11px] uppercase tracking-[.14em] text-blue-300/70">Workflow</div>
+              <h1 class="m-0 text-[30px] leading-none text-white">{{ workflow()?.name || 'Editor' }}</h1>
+              <p class="mt-1 text-sm text-blue-300/70">{{ workflow()?.description || 'Editor visual del workflow' }}</p>
+            </div>
+          </div>
+        </header>
+
+        @if (loading()) {
+          <div class="flex min-h-[60vh] items-center justify-center"><mat-spinner /></div>
+        } @else {
+          <div class="grid min-h-[78vh] gap-[18px] xl:grid-cols-[240px_minmax(0,1fr)_360px]">
+            <aside class="rounded-[22px] border border-blue-900/40 bg-blue-950 p-[18px] shadow-[0_8px_30px_rgba(15,23,42,.05)]">
+              <h3 class="m-0 mb-2.5 text-lg text-blue-100">Tipos de nodo</h3>
+
+              <div class="grid gap-2.5">
+                @for (item of palette; track item.type) {
+                  <button
+                    class="flex items-center gap-2.5 rounded-2xl border border-dashed border-blue-700/50 bg-[#0d2244] px-3 py-3 text-left text-white transition hover:border-blue-500 hover:bg-blue-800/40"
+                    draggable="true"
+                    (dragstart)="onPaletteDragStart($event, item.type)"
+                    (dragend)="onPaletteDragEnd()"
+                  >
+                    <mat-icon>{{ item.icon }}</mat-icon>
+                    <span>{{ item.label }}</span>
+                  </button>
+                }
+              </div>
+            </aside>
+
+            <section class="flex flex-col overflow-hidden rounded-[22px] border border-blue-900/40 bg-blue-950 shadow-[0_8px_30px_rgba(15,23,42,.05)]">
+              <div class="flex items-center justify-between gap-3 border-b border-blue-900/40 px-[18px] py-3">
+                <div class="flex min-w-0 items-center gap-2 overflow-x-auto">
+                  <span class="shrink-0 text-sm font-semibold text-blue-200">Calles</span>
+                  @for (department of departments(); track department.id) {
+                    <button
+                      type="button"
+                      class="shrink-0 rounded-full border px-3 py-1.5 text-sm font-medium transition"
+                      [class.border-blue-400]="isLaneVisible(department.id)"
+                      [class.bg-blue-700]="isLaneVisible(department.id)"
+                      [class.text-white]="isLaneVisible(department.id)"
+                      [class.border-blue-800]="!isLaneVisible(department.id)"
+                      [class.bg-blue-950]="!isLaneVisible(department.id)"
+                      [class.text-blue-100]="!isLaneVisible(department.id)"
+                      (click)="assignDepartmentToSelectedNodo(department.id)">
+                      {{ department.name }}
+                    </button>
+                  }
+                </div>
+
+                <div class="flex items-center gap-2.5">
+                  <button
+                    mat-stroked-button
+                    type="button"
+                    [disabled]="isFormVoiceBusy()"
+                    (click)="toggleFormVoiceCapture()">
+                    @if (isFormVoiceListening()) {
+                      <mat-icon>mic_off</mat-icon>
+                    } @else {
+                      <mat-icon>mic</mat-icon>
+                    }
+                    {{ isFormVoiceListening() ? 'Detener voz' : 'Hablar formularios' }}
+                  </button>
+                  @if (connectingFromId()) {
+                    <button mat-stroked-button (click)="cancelConnect()"><mat-icon>link_off</mat-icon> Cancelar conexion</button>
+                  }
+                </div>
+              </div>
+
+              <div class="relative flex-1 overflow-auto bg-white"
+                   (click)="clearSelection()">
+                @if (draggingPalette()) {
+                  <div class="absolute inset-0 z-30 flex items-center justify-center border-2 border-dashed border-indigo-400 bg-indigo-100/70 text-base font-semibold text-indigo-700"
+                       (dragover)="allowPaletteDrop($event)"
+                       (drop)="onCanvasDrop($event)">
+                    Suelta aqui para crear el nodo
+                  </div>
+                }
+
+                <div #canvas
+                     class="workflow-canvas-boundary relative bg-[radial-gradient(circle_at_1px_1px,_#cbd5e1_1px,_transparent_0)] bg-[length:24px_24px]"
+                     [style.width.px]="canvasWidth()"
+                     [style.min-width.px]="canvasWidth()"
+                     [style.height.px]="canvasHeight()"
+                     [style.min-height.px]="canvasHeight()"
+                     (dragover)="allowPaletteDrop($event)"
+                     (drop)="onCanvasDrop($event)">
+
+                  @for (lane of visibleLanes(); track lane.id) {
+                    <div class="pointer-events-none absolute inset-y-0 z-0 border-x"
+                         [class]="lane.tintClass + ' ' + lane.borderClass"
+                         [style.left.%]="lane.leftPercent"
+                         [style.width.%]="lane.widthPercent">
+                      <div class="sticky top-0 border-b border-inherit bg-white/75 px-3 py-2 text-[11px] font-bold uppercase tracking-[.14em] text-slate-500">
+                        {{ lane.name }}
+                      </div>
+                    </div>
+                  }
+
+                  <svg class="absolute inset-0 z-0 h-full w-full overflow-visible">
+                    <defs>
+                      <marker id="arrow-default" markerWidth="14" markerHeight="10" refX="13" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+                        <path d="M0,0 L14,5 L0,10 z" fill="#334155"></path>
+                      </marker>
+                      <marker id="arrow-selected" markerWidth="14" markerHeight="10" refX="13" refY="5" orient="auto" markerUnits="userSpaceOnUse">
+                        <path d="M0,0 L14,5 L0,10 z" fill="#4f46e5"></path>
+                      </marker>
+                    </defs>
+
+                    @for (transition of workflow()?.transitions || []; track transition.id) {
+                      <path [attr.d]="transitionPath(transition)"
+                            stroke="transparent"
+                            stroke-width="14"
+                            fill="none"
+                            class="cursor-pointer"
+                            (click)="onTransitionClick(transition, $event)"></path>
+                      <path [attr.d]="transitionPath(transition)"
+                            [attr.stroke]="selectedTransitionId() === transition.id ? '#4f46e5' : '#334155'"
+                            stroke-width="2.2"
+                            fill="none"
+                            [attr.marker-end]="selectedTransitionId() === transition.id ? 'url(#arrow-selected)' : 'url(#arrow-default)'"></path>
+                      @if (transitionLabel(transition); as label) {
+                        @if (transitionLabelPosition(transition); as labelPos) {
+                          <g class="cursor-pointer" (click)="onTransitionClick(transition, $event)">
+                            <rect [attr.x]="labelPos.x - 34" [attr.y]="labelPos.y - 12" width="68" height="24" rx="12"
+                                  fill="white"
+                                  [attr.stroke]="selectedTransitionId() === transition.id ? '#4f46e5' : '#cbd5e1'"></rect>
+                            <text [attr.x]="labelPos.x" [attr.y]="labelPos.y + 4" text-anchor="middle" font-size="11" font-weight="700"
+                                  [attr.fill]="selectedTransitionId() === transition.id ? '#4f46e5' : '#334155'"
+                              {{ label }}
+                            </text>
+                          </g>
+                        }
+                      }
+                    }
+                  </svg>
+
+                  @for (nodo of workflow()?.nodo || []; track nodo.id) {
+                    <div class="absolute left-0 top-0 z-10"
+                         cdkDrag
+                         [cdkDragFreeDragPosition]="{ x: nodo.posX || 0, y: nodo.posY || 0 }"
+                         [cdkDragBoundary]="'.workflow-canvas-boundary'"
+                         [cdkDragDisabled]="isLockedByOther(nodo.id)"
+                         (cdkDragStarted)="tryLockNodo(nodo.id)"
+                         (cdkDragEnded)="onNodoDragEnd(nodo, $event)"
+                         (click)="onNodoClick(nodo, $event)">
+                      <div [class]="nodeCardClass(nodo)">
+                        <button type="button"
+                                class="absolute -right-2 -top-2 z-20 flex h-8 w-8 items-center justify-center rounded-full border border-blue-700/50 bg-[#0a1628] text-blue-400 shadow hover:bg-blue-800/50"
+                                title="Conectar"
+                                (click)="iniciarConexion(nodo, $event)">
+                          <mat-icon class="!h-4 !w-4 !text-[16px]">add_link</mat-icon>
+                        </button>
+
+                        @switch (tipoNodo(nodo)) {
+                          @case ('inicio') {
+                            <div class="h-[52px] w-[52px] rounded-full bg-[#081726] shadow-md"></div>
+                          }
+                          @case ('fin') {
+                            <div class="flex h-[56px] w-[56px] items-center justify-center rounded-full border-[5px] border-slate-900 bg-blue-950 shadow-md">
+                              <div class="h-[32px] w-[32px] rounded-full bg-[#081726]"></div>
+                            </div>
+                          }
+                          @case ('decision') {
+                            <div class="h-[80px] w-[80px] rotate-45 border-[2px] border-blue-800/40 bg-blue-950 shadow"></div>
+                          }
+                          @case ('iteracion') {
+                            <div class="h-[80px] w-[80px] rotate-45 border-[2px] border-blue-800/40 bg-blue-950 shadow"></div>
+                          }
+                          @case ('bifurcasion') {
+                            <div class="h-[8px] w-[120px] rounded bg-[#081726]"></div>
+                          }
+                          @case ('union') {
+                            <div class="h-[8px] w-[120px] rounded bg-[#081726]"></div>
+                          }
+                          @default {
+                            <div class="flex w-[150px] items-center justify-center rounded-[14px] border-2 border-blue-800/40 bg-blue-950 px-3 py-2.5 shadow-sm">
+                              <div class="text-center text-sm font-semibold text-white">{{ nodo.name }}</div>
+                            </div>
+                          }
+                        }
+                      </div>
+                    </div>
+                  }
+                </div>
+              </div>
+            </section>
+
+            <aside class="rounded-[22px] border border-blue-900/40 bg-blue-950 p-[18px] shadow-[0_8px_30px_rgba(15,23,42,.05)]">
+              <div class="mb-4 space-y-1">
+                <div class="grid grid-cols-3 gap-1 rounded-2xl bg-[#0d1b2e] p-1">
+                  <button type="button" class="rounded-xl px-2 py-2 text-xs font-semibold"
+                          [class.bg-blue-950]="sidebarTab() === 'inspector'"
+                          [class.text-blue-300]="sidebarTab() === 'inspector'"
+                          (click)="sidebarTab.set('inspector')">Inspector</button>
+                  <button type="button" class="rounded-xl px-2 py-2 text-xs font-semibold"
+                          [class.bg-blue-950]="sidebarTab() === 'priority'"
+                          [class.text-blue-300]="sidebarTab() === 'priority'"
+                          (click)="sidebarTab.set('priority')">Prioridad</button>
+                  <button type="button" class="rounded-xl px-2 py-2 text-xs font-semibold"
+                          [class.bg-blue-950]="sidebarTab() === 'anomaly'"
+                          [class.text-blue-300]="sidebarTab() === 'anomaly'"
+                          (click)="sidebarTab.set('anomaly')">Anomalías</button>
+                </div>
+                <div class="grid grid-cols-2 gap-1 rounded-2xl bg-[#0d1b2e] p-1">
+                  <button type="button" class="rounded-xl px-2 py-2 text-xs font-semibold"
+                          [class.bg-blue-950]="sidebarTab() === 'bottleneck'"
+                          [class.text-blue-300]="sidebarTab() === 'bottleneck'"
+                          (click)="sidebarTab.set('bottleneck')">Cuello de Botella</button>
+                  <button type="button" class="rounded-xl px-2 py-2 text-xs font-semibold"
+                          [class.bg-blue-950]="sidebarTab() === 'delay'"
+                          [class.text-blue-300]="sidebarTab() === 'delay'"
+                          (click)="sidebarTab.set('delay')">Demora</button>
+                </div>
+              </div>
+
+              @if (sidebarTab() === 'inspector' && selectedNodo()) {
+                <h3 class="m-0 mb-3 text-lg text-white">Editar nodo</h3>
+
+                @if (incomingFieldsForSelectedNodo().length) {
+                  <div class="mb-4 rounded-2xl border border-blue-700/40 bg-blue-900/30 p-3">
+                    <div class="mb-2 text-sm font-semibold text-white">Datos que llegan a este nodo</div>
+                    <div class="grid gap-3">
+                      @for (block of incomingFieldsForSelectedNodo(); track block.fromNodoName) {
+                        <div>
+                          <div class="mb-1 text-xs font-bold uppercase tracking-wide text-blue-300">{{ block.fromNodoName }}</div>
+                          <div class="flex flex-wrap gap-2">
+                            @for (field of block.fields; track field.id) {
+                              <span class="rounded-full bg-blue-950 px-3 py-1 text-xs font-semibold text-blue-300">{{ field.name }}</span>
+                            }
+                          </div>
+                        </div>
+                      }
+                    </div>
+                  </div>
+                }
+
+                @if (nodoForm.nodeType !== 'decision' && nodoForm.nodeType !== 'iteracion') {
+                  <mat-form-field appearance="outline" class="w-full">
+                    <mat-label>Nombre</mat-label>
+                    <input matInput [(ngModel)]="nodoForm.name">
+                  </mat-form-field>
+
+                  <mat-form-field appearance="outline" class="w-full">
+                    <mat-label>Descripcion</mat-label>
+                    <textarea matInput rows="3" [(ngModel)]="nodoForm.description"></textarea>
+                  </mat-form-field>
+                }
+
+                <mat-form-field appearance="outline" class="w-full">
+                  <mat-label>Tipo</mat-label>
+                  <mat-select [(ngModel)]="nodoForm.nodeType">
+                    @for (item of palette; track item.type) {
+                      <mat-option [value]="item.type">{{ item.label }}</mat-option>
+                    }
+                  </mat-select>
+                </mat-form-field>
+
+                @if (esNodoHumano(nodoForm.nodeType)) {
+                  <mat-checkbox class="mb-2" [(ngModel)]="nodoForm.requiresForm">Este proceso usa formulario</mat-checkbox>
+
+                  <mat-form-field appearance="outline" class="w-full">
+                    <mat-label>Departamento</mat-label>
+                    <mat-select [(ngModel)]="nodoForm.responsibleDepartmentId" (ngModelChange)="onResponsibleDepartmentChange($event)">
+                      <mat-option value="">Sin departamento</mat-option>
+                      @for (department of departments(); track department.id) {
+                        <mat-option [value]="department.id">{{ department.name }}</mat-option>
+                      }
+                    </mat-select>
+                  </mat-form-field>
+
+                  @if (nodoForm.responsibleDepartmentId) {
+                    <mat-form-field appearance="outline" class="w-full">
+                      <mat-label>Cargo</mat-label>
+                      <mat-select [(ngModel)]="nodoForm.responsibleJobRoleId" (ngModelChange)="onResponsibleJobRoleChange($event)">
+                        <mat-option value="">Sin cargo</mat-option>
+                        @for (role of rolesForDepartment(nodoForm.responsibleDepartmentId); track role.id) {
+                          <mat-option [value]="role.id">{{ role.name }}</mat-option>
+                        }
+                      </mat-select>
+                    </mat-form-field>
+                  }
+
+                  <mat-form-field appearance="outline" class="w-full">
+                    <mat-label>Promedio en minutos</mat-label>
+                    <input matInput type="number" min="1" [(ngModel)]="nodoForm.avgMinutes">
+                  </mat-form-field>
+
+                  <div class="mt-3 rounded-2xl border border-blue-900/40 p-3">
+                    <div class="mb-3">
+                      <div class="text-sm font-semibold text-white">Permisos documentales</div>
+                      <div class="text-xs text-blue-300/70">Que puede hacer el responsable del nodo con los archivos adjuntos.</div>
+                    </div>
+                    @if (nodoForm.responsibleJobRoleId) {
+                      <div class="flex flex-wrap gap-3">
+                        <mat-checkbox [(ngModel)]="nodoForm.documentPermissions[0].canRead">Leer</mat-checkbox>
+                        <mat-checkbox [(ngModel)]="nodoForm.documentPermissions[0].canEdit">Editar</mat-checkbox>
+                      </div>
+                    } @else {
+                      <div class="text-xs text-blue-300/50">Selecciona un cargo para configurar permisos.</div>
+                    }
+                  </div>
+
+                  @if (nodoForm.requiresForm) {
+                    <div class="mt-3 rounded-2xl border border-blue-900/40 p-3">
+                      <div class="mb-2 text-sm font-semibold text-white">Formulario</div>
+                      <mat-form-field appearance="outline" class="w-full">
+                        <mat-label>Titulo del formulario</mat-label>
+                        <input matInput [(ngModel)]="nodoForm.formTitle">
+                      </mat-form-field>
+
+                      <div class="grid gap-2">
+                        @for (field of nodoForm.formFields; track field.id; let i = $index) {
+                          <div class="rounded-xl border border-blue-900/40 p-3">
+                            <div class="grid grid-cols-[1fr_110px] gap-2">
+                              <mat-form-field appearance="outline" class="w-full">
+                                <mat-label>Campo</mat-label>
+                                <input matInput [(ngModel)]="field.name">
+                              </mat-form-field>
+                              <mat-form-field appearance="outline" class="w-full">
+                                <mat-label>Tipo</mat-label>
+                                <mat-select [ngModel]="field.type" (ngModelChange)="onFieldTypeChange(field, $event)">
+                                  @for (type of fieldTypes; track type) {
+                                    <mat-option [value]="type">{{ type }}</mat-option>
+                                  }
+                                </mat-select>
+                              </mat-form-field>
+                            </div>
+                            @if (field.type === 'GRID') {
+                              <div class="mt-2 rounded-xl border border-dashed border-blue-800/40 bg-[#081726] p-2">
+                                <div class="mb-2 text-xs font-semibold uppercase tracking-wide text-blue-200">Columnas de la grilla</div>
+                                <div class="flex flex-col gap-1.5">
+                                  @for (column of field.columns || []; track column.id; let j = $index) {
+                                    <div class="flex items-center gap-1.5">
+                                      <input
+                                        class="min-w-0 flex-1 rounded-lg border border-blue-900/40 bg-blue-950 px-2 py-1.5 text-sm text-blue-50 outline-none focus:border-indigo-400"
+                                        placeholder="Nombre"
+                                        [(ngModel)]="column.name" />
+                                      <select
+                                        class="w-[90px] shrink-0 rounded-lg border border-blue-900/40 bg-blue-950 px-2 py-1.5 text-sm text-blue-50 outline-none focus:border-indigo-400"
+                                        [(ngModel)]="column.type">
+                                        @for (type of gridColumnTypes; track type) {
+                                          <option [value]="type">{{ type }}</option>
+                                        }
+                                      </select>
+                                      <button
+                                        type="button"
+                                        class="shrink-0 rounded-lg border border-rose-800/40 bg-rose-900/20 px-2 py-1.5 text-xs font-medium text-rose-400 hover:bg-rose-900/30"
+                                        (click)="removeGridColumn(field, j)">✕</button>
+                                    </div>
+                                  }
+                                </div>
+                                <button mat-stroked-button class="mt-2 w-full" (click)="addGridColumn(field)">
+                                  <mat-icon>view_column</mat-icon> Agregar columna
+                                </button>
+                              </div>
+                            }
+                            <div class="mt-2 flex items-center justify-between">
+                              <mat-checkbox [(ngModel)]="field.isRequired">Obligatorio</mat-checkbox>
+                              <button mat-button color="warn" (click)="removeFormField(i)">Quitar</button>
+                            </div>
+                          </div>
+                        }
+                      </div>
+
+                      <button mat-stroked-button class="mt-3" (click)="addFormField()">
+                        <mat-icon>add</mat-icon> Agregar campo
+                      </button>
+                    </div>
+                  }
+                }
+
+                @if (nodoForm.nodeType === 'decision' || nodoForm.nodeType === 'iteracion') {
+                  <div class="grid grid-cols-2 gap-2.5">
+                    <mat-form-field appearance="outline">
+                      <mat-label>Etiqueta 1</mat-label>
+                      <input matInput [(ngModel)]="nodoForm.trueLabel">
+                    </mat-form-field>
+
+                    <mat-form-field appearance="outline">
+                      <mat-label>Etiqueta 2</mat-label>
+                      <input matInput [(ngModel)]="nodoForm.falseLabel">
+                    </mat-form-field>
+                  </div>
+
+                }
+
+                <div class="mt-3 flex justify-end">
+                  <div class="flex gap-2">
+                    <button mat-stroked-button color="warn" (click)="removeSelected()">
+                      <mat-icon>delete</mat-icon> Eliminar nodo
+                    </button>
+                    <button mat-flat-button color="primary" (click)="saveNodo()">Guardar nodo</button>
+                  </div>
+                </div>
+              } @else if (sidebarTab() === 'inspector' && selectedTransition()) {
+                <h3 class="m-0 mb-3 text-lg text-white">Editar conexion</h3>
+                <div class="mb-3 rounded-2xl border border-blue-900/40 bg-[#081726] p-3 text-sm text-blue-200">
+                  {{ sourceNodoName(selectedTransition()!) }} -> {{ targetNodoName(selectedTransition()!) }}
+                </div>
+
+                    <mat-form-field appearance="outline" class="w-full">
+                      <mat-label>Que parte del formulario pasa</mat-label>
+                      <mat-select [(ngModel)]="transitionForm.mode">
+                        <mat-option value="none">No pasar campos</mat-option>
+                        <mat-option value="all">Pasar todo el formulario</mat-option>
+                        <mat-option value="selected">Seleccionar campos</mat-option>
+                        <mat-option value="files-only">Solo archivos</mat-option>
+                      </mat-select>
+                    </mat-form-field>
+
+                  @if (transitionForm.mode === 'selected' || transitionForm.mode === 'all') {
+                    <mat-checkbox class="mb-3" [(ngModel)]="transitionForm.includeFiles">
+                      Incluir archivos
+                    </mat-checkbox>
+                  }
+
+                  @if (availableForwardFields().length) {
+                    <div class="rounded-2xl border border-blue-900/40 p-3">
+                    <div class="mb-2 text-sm font-semibold text-white">Campos del formulario A</div>
+                    <div class="grid gap-2">
+                      @for (field of availableForwardFields(); track field.id) {
+                        <mat-checkbox
+                          [checked]="transitionForm.fieldNames.includes(field.name)"
+                          [disabled]="transitionForm.mode !== 'selected'"
+                          (change)="toggleForwardField(field.name, $event.checked)">
+                          {{ field.name }} · {{ field.type }}
+                        </mat-checkbox>
+                      }
+                    </div>
+                  </div>
+
+                  <div class="mt-3 rounded-2xl border border-blue-700/40 bg-blue-900/30 p-3">
+                    <div class="mb-2 text-sm font-semibold text-white">Campos que pasan de A a B</div>
+                    @if (resolvedForwardFields().length) {
+                      <div class="flex flex-wrap gap-2">
+                        @for (field of resolvedForwardFields(); track field.name) {
+                          <span class="rounded-full bg-blue-950 px-3 py-1 text-xs font-semibold text-blue-300">{{ field.name }}</span>
+                        }
+                      </div>
+                    } @else {
+                      <div class="text-sm text-blue-300/70">Esta conexion no esta enviando campos.</div>
+                    }
+                  </div>
+                } @else {
+                  <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">
+                    El nodo origen no tiene formulario configurado.
+                  </div>
+                }
+
+                <div class="mt-3 flex justify-end">
+                  <div class="flex gap-2">
+                    <button mat-stroked-button color="warn" (click)="removeSelected()">
+                      <mat-icon>delete</mat-icon> Eliminar conexion
+                    </button>
+                    <button mat-flat-button color="primary" (click)="saveTransition()">Guardar conexion</button>
+                  </div>
+                </div>
+              } @else if (sidebarTab() === 'priority') {
+                <div class="space-y-4">
+                  <div class="flex items-center justify-between">
+                    <h3 class="m-0 text-lg text-white">Prioridad</h3>
+                    <button mat-stroked-button [disabled]="priorityLoading() || !workflow()?.id" (click)="runPriorityAnalysis()">
+                      @if (priorityLoading()) { <mat-spinner diameter="16" /> } @else { <mat-icon>bolt</mat-icon> }
+                      Entrenar
+                    </button>
+                  </div>
+                  @if (!workflow()?.id) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Guarda el workflow primero.</div>
+                  } @else if (priorityLoading()) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-center text-sm text-blue-300/70">Entrenando modelo…</div>
+                  } @else if (priorityResult()) {
+                    <div class="text-xs text-blue-300/70">Entrenado con {{ priorityResult()!.trainedOn }} trámites · {{ priorityResult()!.total }} activos</div>
+                    @if (!priorityResult()!.ranked.length) {
+                      <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Sin trámites activos en este workflow.</div>
+                    }
+                    @for (t of priorityResult()!.ranked; track t.id) {
+                      <div class="rounded-2xl border border-blue-900/40 bg-blue-950 p-3">
+                        <div class="flex items-start justify-between gap-2">
+                          <div>
+                            <div class="text-sm font-semibold text-blue-50">{{ t.code }}</div>
+                            @if (t.title) { <div class="mt-0.5 text-xs text-blue-300/70">{{ t.title }}</div> }
+                          </div>
+                          <span class="shrink-0 rounded-full bg-[#0a1f35] px-2.5 py-0.5 text-sm font-bold tabular-nums text-white">{{ (t.urgencyScore * 100).toFixed(0) }}%</span>
+                        </div>
+                        <div class="mt-2 text-xs text-blue-300/70">Abierto hace {{ formatHours(t.elapsedHours) }} &nbsp;·&nbsp; Debió cerrarse en {{ formatHours(t.expectedHours) }}</div>
+                        <div class="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[#0d1b2e]">
+                          <div class="h-full rounded-full bg-[#0a1f35] transition-all" [style.width.%]="t.urgencyScore * 100"></div>
+                        </div>
+                      </div>
+                    }
+                  } @else {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Presiona Entrenar para analizar los trámites activos.</div>
+                  }
+                </div>
+              } @else if (sidebarTab() === 'anomaly') {
+                <div class="space-y-4">
+                  <div class="flex items-center justify-between">
+                    <h3 class="m-0 text-lg text-white">Anomalías</h3>
+                    <button mat-stroked-button [disabled]="anomalyLoading() || !workflow()?.id" (click)="runAnomalyAnalysis()">
+                      @if (anomalyLoading()) { <mat-spinner diameter="16" /> } @else { <mat-icon>radar</mat-icon> }
+                      Entrenar
+                    </button>
+                  </div>
+                  @if (!workflow()?.id) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Guarda el workflow primero.</div>
+                  } @else if (anomalyLoading()) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-center text-sm text-blue-300/70">Entrenando autoencoder…</div>
+                  } @else if (anomalyResult()) {
+                    <div class="text-xs text-blue-300/70">Entrenado con {{ anomalyResult()!.trainedOn }} trámites normales</div>
+                    @if (anomalyResult()!.totalAnomalies) {
+                      <div class="mb-1 text-xs font-semibold text-red-400">{{ anomalyResult()!.totalAnomalies }} anomalía(s) detectada(s)</div>
+                      @for (a of anomalyResult()!.anomalies; track a.id) {
+                        <div class="rounded-2xl border border-blue-900/40 bg-blue-950 p-3">
+                          <div class="text-sm font-semibold text-blue-50">{{ a.code }}</div>
+                          <div class="mt-0.5 text-xs text-blue-300/70">{{ a.workflowName }}{{ a.currentNodoName ? ' — ' + a.currentNodoName : '' }}</div>
+                          <div class="mt-1.5 text-xs text-blue-200">{{ a.factorDetail ?? (formatHours(a.elapsedHours) + ' abierto · esperado ' + formatHours(a.expectedHours)) }}</div>
+                        </div>
+                      }
+                    } @else if (anomalyResult()!.total) {
+                      <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Sin anomalías detectadas.</div>
+                    } @else {
+                      <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Sin trámites activos en este workflow.</div>
+                    }
+                  } @else {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Presiona Entrenar para detectar comportamientos anómalos.</div>
+                  }
+                </div>
+              } @else if (sidebarTab() === 'bottleneck') {
+                <div class="space-y-4">
+                  <div class="flex items-center justify-between">
+                    <h3 class="m-0 text-lg text-white">Cuello de Botella</h3>
+                    <button mat-stroked-button [disabled]="bottleneckLoading() || !workflow()?.id" (click)="runBottleneckAnalysis()">
+                      @if (bottleneckLoading()) { <mat-spinner diameter="16" /> } @else { <mat-icon>compress</mat-icon> }
+                      Analizar
+                    </button>
+                  </div>
+                  @if (!workflow()?.id) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Guarda el workflow primero.</div>
+                  } @else if (bottleneckLoading()) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-center text-sm text-blue-300/70">Analizando nodos…</div>
+                  } @else if (bottleneckResult()) {
+                    @if (!bottleneckResult()!.allNodes?.length) {
+                      <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Sin datos suficientes aún.</div>
+                    }
+                    @for (n of bottleneckResult()!.allNodes; track n.nodoId) {
+                      <div class="rounded-2xl border p-3" [class.border-red-300]="n.isBottleneck" [class.bg-red-950]="n.isBottleneck" [class.border-blue-900]="!n.isBottleneck" [class.bg-blue-950]="!n.isBottleneck">
+                        <div class="flex items-center justify-between gap-2">
+                          <div class="text-sm font-semibold text-blue-50">{{ n.nodoName }}</div>
+                          @if (n.isBottleneck) {
+                            <span class="shrink-0 rounded-full bg-red-600 px-2 py-0.5 text-xs font-bold text-white">Cuello</span>
+                          }
+                        </div>
+                        <div class="mt-1 text-xs text-blue-300/70">Score: {{ (n.score * 100).toFixed(0) }}% · Promedio: {{ n.avgMinutes }} min</div>
+                        <div class="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-[#0d1b2e]">
+                          <div class="h-full rounded-full transition-all" [class.bg-red-950/300]="n.isBottleneck" [class.bg-blue-700]="!n.isBottleneck" [style.width.%]="n.score * 100"></div>
+                        </div>
+                      </div>
+                    }
+                  } @else {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Presiona Analizar para detectar los nodos más lentos.</div>
+                  }
+                </div>
+              } @else if (sidebarTab() === 'delay') {
+                <div class="space-y-4">
+                  <div class="flex items-center justify-between">
+                    <h3 class="m-0 text-lg text-white">Demora</h3>
+                    <button mat-stroked-button [disabled]="delayLoading() || !workflow()?.id" (click)="runDelayAnalysis()">
+                      @if (delayLoading()) { <mat-spinner diameter="16" /> } @else { <mat-icon>schedule</mat-icon> }
+                      Predecir
+                    </button>
+                  </div>
+                  @if (!workflow()?.id) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Guarda el workflow primero.</div>
+                  } @else if (delayLoading()) {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-center text-sm text-blue-300/70">Calculando predicción…</div>
+                  } @else if (delayResult()) {
+                    @if (!delayResult()!.available) {
+                      <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">{{ delayResult()!.message ?? 'Sin datos históricos suficientes.' }}</div>
+                    } @else {
+                      <div class="rounded-2xl border p-4 text-center"
+                           [class.border-red-300]="delayResult()!.riskLevel === 'ALTO'"
+                           [class.bg-red-950]="delayResult()!.riskLevel === 'ALTO'"
+                           [class.border-yellow-300]="delayResult()!.riskLevel === 'MEDIO'"
+                           [class.bg-yellow-950]="delayResult()!.riskLevel === 'MEDIO'"
+                           [class.border-green-300]="delayResult()!.riskLevel === 'BAJO'"
+                           [class.bg-green-950]="delayResult()!.riskLevel === 'BAJO'">
+                        <div class="text-3xl font-bold"
+                             [class.text-red-400]="delayResult()!.riskLevel === 'ALTO'"
+                             [class.text-yellow-400]="delayResult()!.riskLevel === 'MEDIO'"
+                             [class.text-green-400]="delayResult()!.riskLevel === 'BAJO'">
+                          {{ (delayResult()!.delayProbability * 100).toFixed(0) }}%
+                        </div>
+                        <div class="mt-1 text-sm font-semibold"
+                             [class.text-red-400]="delayResult()!.riskLevel === 'ALTO'"
+                             [class.text-yellow-400]="delayResult()!.riskLevel === 'MEDIO'"
+                             [class.text-green-400]="delayResult()!.riskLevel === 'BAJO'">
+                          Riesgo {{ delayResult()!.riskLevel }}
+                        </div>
+                      </div>
+                      <div class="space-y-1 text-xs text-blue-200">
+                        <div class="flex justify-between"><span>Tiempo esperado</span><span class="font-semibold">{{ delayResult()!.totalExpectedHours }}h</span></div>
+                        <div class="flex justify-between"><span>Retraso estimado</span><span class="font-semibold">+{{ delayResult()!.extraHoursEstimated }}h</span></div>
+                        <div class="flex justify-between"><span>Tasa histórica</span><span class="font-semibold">{{ (delayResult()!.historicalDelayRate * 100).toFixed(0) }}%</span></div>
+                        <div class="flex justify-between"><span>Nodos</span><span class="font-semibold">{{ delayResult()!.numNodos }}</span></div>
+                      </div>
+                    }
+                  } @else {
+                    <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">Presiona Predecir para estimar la probabilidad de demora.</div>
+                  }
+                </div>
+              } @else {
+                <h3 class="m-0 mb-3 text-lg text-white">Inspector</h3>
+                <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">
+                  Haz click en un nodo para editarlo o en la flecha para editar lo que pasa de A hacia B.
+                </div>
+              }
+              <app-workflow-ai-panel
+                #formVoiceAssistant
+                class="hidden"
+                [activeTab]="'diagram-ai'"
+                [workflowId]="workflow()?.id || ''"
+                [workflowName]="workflow()?.name || ''"
+                [nodo]="workflow()?.nodo || []"
+                [transitions]="workflow()?.transitions || []"
+                [departments]="departments()"
+                [jobRoles]="jobRoles()"
+                [selectedNodo]="selectedNodo()"
+                [applyAiActions]="applyAiActionsBound"
+                [applyVoiceFormPatch]="applyVoiceFormPatchBound"
+                [onError]="showAiError">
+              </app-workflow-ai-panel>
+            </aside>
+          </div>
+        }
+      </div>
+    </div>
+
+
+
+

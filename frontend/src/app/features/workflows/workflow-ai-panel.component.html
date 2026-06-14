@@ -1,0 +1,197 @@
+﻿    @if (activeTab === 'diagram-ai') {
+      <div class="space-y-4">
+        <h3 class="m-0 text-lg text-slate-950">IA del Diagrama</h3>
+        <textarea
+          [(ngModel)]="diagramPrompt"
+          rows="6"
+          class="w-full rounded-2xl border border-blue-800/40 bg-blue-950 px-4 py-3 text-sm text-white outline-none transition focus:border-blue-500"
+          placeholder="Ejemplo: elimina el nodo Revision, crea un proceso Aprobacion final y conectalo con Fin"></textarea>
+        <div class="flex justify-end gap-2">
+          <button mat-flat-button color="primary" [disabled]="diagramBusy() || diagramVoiceListening() || !diagramPrompt.trim()" (click)="runDiagramCommand()">
+            @if (diagramBusy()) {
+              <mat-spinner diameter="18" />
+            } @else {
+              <mat-icon>auto_awesome</mat-icon>
+            }
+            Ejecutar
+          </button>
+        </div>
+
+        @if (diagramResult()) {
+          <div class="rounded-2xl border border-indigo-200 bg-indigo-50 p-4">
+            <div class="text-sm font-semibold text-white">{{ diagramResult()?.interpretation || 'Resultado' }}</div>
+            @if (diagramResult()?.changes) {
+              <div class="mt-2 text-sm text-blue-200">{{ diagramResult()?.changes }}</div>
+            }
+            @if (diagramResult()?.actions?.length) {
+              <div class="mt-3 grid gap-2">
+                @for (action of diagramResult()?.actions || []; track $index) {
+                  <div class="rounded-xl bg-blue-950 px-3 py-2 text-sm text-blue-100">{{ describeAiAction(action) }}</div>
+                }
+              </div>
+            }
+          </div>
+        }
+      </div>
+    } @else if (activeTab === 'worky') {
+      <div class="space-y-4">
+        <div class="flex items-center gap-3">
+          <h3 class="m-0 text-lg text-slate-950">Worky</h3>
+          @if (workyLoading()) {
+            <mat-spinner diameter="18" />
+          }
+        </div>
+
+        @if (!workflowId) {
+          <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">
+            Guarda el workflow antes de pedir sugerencias.
+          </div>
+        } @else {
+          <div class="grid gap-3">
+            <div class="rounded-2xl border border-blue-900/40 bg-blue-950 p-4">
+              <div class="text-sm font-semibold text-white">Hablar con Worky</div>
+              <textarea
+                [(ngModel)]="workyPrompt"
+                rows="4"
+                class="mt-3 w-full rounded-2xl border border-blue-800/40 bg-blue-950 px-4 py-3 text-sm text-white outline-none transition focus:border-blue-500"
+                placeholder="Ejemplo: Worky, que ves mal en mi canvas?"></textarea>
+              <div class="mt-3 flex justify-end">
+                <button mat-flat-button color="primary" [disabled]="workyLoading() || !workyPrompt.trim()" (click)="sendWorkyMessage()">
+                  @if (workyLoading()) {
+                    <mat-spinner diameter="18" />
+                  } @else {
+                    <mat-icon>send</mat-icon>
+                  }
+                  Preguntar
+                </button>
+              </div>
+            </div>
+
+            @if (workyChat().length) {
+              <div class="grid gap-2">
+                @for (message of workyChat(); track $index) {
+                  <div
+                    class="rounded-2xl px-4 py-3 text-sm"
+                    [class.bg-[#0d1b2e]]="message.role === 'user'"
+                    [class.text-white]="message.role === 'user'"
+                    [class.bg-emerald-50]="message.role === 'assistant'"
+                    [class.text-emerald-900]="message.role === 'assistant'">
+                    {{ message.content }}
+                  </div>
+                }
+              </div>
+            }
+
+            @if (workyResult()?.summary) {
+              <div class="rounded-2xl border border-blue-900/40 bg-[#081726] px-4 py-3 text-sm text-blue-100">
+                {{ workyResult()?.summary }}
+              </div>
+            }
+            @for (suggestion of workyResult()?.suggestions || []; track $index) {
+              <div class="rounded-2xl border border-blue-900/40 bg-blue-950 p-4">
+                <div class="text-sm font-semibold text-white">{{ suggestion.title }}</div>
+                <div class="mt-1 text-sm text-blue-200">{{ suggestion.reason }}</div>
+                @if (suggestion.actions.length) {
+                  <div class="mt-3 grid gap-2">
+                    @for (action of suggestion.actions; track $index) {
+                      <div class="rounded-xl bg-[#081726] px-3 py-2 text-sm text-blue-100">{{ describeAiAction(action) }}</div>
+                    }
+                  </div>
+                  <div class="mt-3 flex justify-end">
+                    <button mat-flat-button color="primary" [disabled]="diagramBusy()" (click)="applyWorkySuggestion(suggestion)">
+                      Aplicar sugerencia
+                    </button>
+                  </div>
+                }
+              </div>
+            }
+            @if (!workyResult()?.suggestions?.length && !workyResult()?.summary) {
+              <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">
+                @if (workyLoading()) {
+                  Worky esta analizando el workflow...
+                } @else {
+                  No hay sugerencias todavia.
+                }
+              </div>
+            }
+          </div>
+        }
+      </div>
+    } @else if (activeTab === 'bottleneck') {
+      <div class="space-y-4">
+        <div class="flex items-center justify-between gap-3">
+          <h3 class="m-0 text-lg text-slate-950">Analisis de Cuellos</h3>
+          <button mat-stroked-button [disabled]="bottleneckLoading() || !workflowId" (click)="runBottleneckAnalysis()">
+            @if (bottleneckLoading()) {
+              <mat-spinner diameter="18" />
+            } @else {
+              <mat-icon>insights</mat-icon>
+            }
+            Analizar
+          </button>
+        </div>
+
+        @if (!workflowId) {
+          <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">
+            Guarda el workflow antes de analizarlo.
+          </div>
+        } @else if (bottleneckResult()) {
+          <div class="grid gap-3">
+            @if (groupedRoleMetrics().length) {
+              <div>
+                <div class="mb-2 text-sm font-semibold text-white">Metricas por departamento / rol</div>
+                <div class="grid gap-2">
+                  @for (grp of groupedRoleMetrics(); track grp.key) {
+                    <div class="rounded-xl border border-blue-900/40 bg-blue-950 p-3">
+                      <div class="mb-2">
+                        <div class="text-sm font-semibold text-white">{{ grp.roleName || 'Sin rol' }}</div>
+                        @if (grp.deptName) {
+                          <div class="mt-0.5 text-[11px] text-blue-300/70">{{ grp.deptName }}</div>
+                        }
+                      </div>
+                      <div class="grid grid-cols-2 gap-x-3 gap-y-1.5">
+                        <div>
+                          <div class="text-[10px] uppercase tracking-wide text-blue-300/50">Espera promedio</div>
+                          <div class="text-sm font-semibold text-white">{{ formatMinutes(grp.avgEspera) }}</div>
+                        </div>
+                        <div>
+                          <div class="text-[10px] uppercase tracking-wide text-blue-300/50">En nodo promedio</div>
+                          <div class="text-sm font-semibold text-white">{{ formatMinutes(grp.avgEnNodo) }}</div>
+                        </div>
+                        <div>
+                          <div class="text-[10px] uppercase tracking-wide text-blue-300/50">Activas</div>
+                          <div class="text-sm font-semibold text-white">{{ grp.totalActivas }}</div>
+                        </div>
+                        <div>
+                          <div class="text-[10px] uppercase tracking-wide text-blue-300/50">Muestras</div>
+                          <div class="text-sm font-semibold text-white">{{ grp.totalMuestras }}</div>
+                        </div>
+                      </div>
+                      <div class="mt-1.5 text-[11px] text-blue-300/50">meta: {{ formatMinutes(grp.avgTarget) }}</div>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+            @if (bottleneckSuggestions().length) {
+              <div class="rounded-2xl border border-violet-200 bg-violet-50 p-4">
+                <div class="mb-2.5 text-sm font-semibold text-violet-900">Sugerencias</div>
+                <div class="grid gap-2">
+                  @for (s of bottleneckSuggestions(); track $index) {
+                    <div class="flex gap-2 text-sm text-violet-800">
+                      <span class="mt-0.5 shrink-0 text-violet-400">›</span>
+                      <span>{{ s }}</span>
+                    </div>
+                  }
+                </div>
+              </div>
+            }
+          </div>
+        } @else {
+          <div class="rounded-2xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-5 text-sm text-blue-300/70">
+            Ejecuta el analisis para ver cuellos de botella.
+          </div>
+        }
+      </div>
+    }
+  `

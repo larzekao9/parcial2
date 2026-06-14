@@ -1,0 +1,1151 @@
+package com.workflow.service;
+
+import com.workflow.model.Department;
+import com.workflow.model.FormDefinition;
+import com.workflow.model.JobRole;
+import com.workflow.model.Tramite;
+import com.workflow.model.HistorialTramite;
+import com.workflow.model.User;
+import com.workflow.model.Workflow;
+import com.workflow.model.WorkflowNodo;
+import com.workflow.model.WorkflowTransition;
+import com.workflow.repository.DepartmentRepository;
+import com.workflow.repository.FormDefinitionRepository;
+import com.workflow.repository.JobRoleRepository;
+import com.workflow.repository.HistorialTramiteRepository;
+import com.workflow.repository.TramiteRepository;
+import com.workflow.repository.UserRepository;
+import com.workflow.repository.WorkflowRepository;
+import com.workflow.repository.WorkflowNodoRepository;
+import com.workflow.repository.WorkflowTransitionRepository;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.stereotype.Service;
+import org.springframework.web.server.ResponseStatusException;
+
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
+
+@Service
+@Slf4j
+@RequiredArgsConstructor
+public class TramiteService {
+
+    private final TramiteRepository tramiteRepo;
+    private final HistorialTramiteRepository historyRepo;
+    private final WorkflowRepository workflowRepo;
+    private final WorkflowNodoRepository nodoRepo;
+    private final WorkflowTransitionRepository transitionRepo;
+    private final FormDefinitionRepository formRepo;
+    private final JobRoleRepository jobRoleRepo;
+    private final DepartmentRepository departmentRepo;
+    private final UserRepository userRepository;
+    private final DocumentAccessService documentAccessService;
+    private final WorkflowAiProxyService workflowAiProxyService;
+    private final FcmService fcmService;
+    private final ReportRealtimeService reportRealtimeService;
+    private final FileStorageService fileStorageService;
+    private final TramiteNotificationHelper notificationHelper;
+    private final TramiteFormFieldHelper formFieldHelper;
+    private final List<NodoTipoHandler> nodoTipoHandlers = List.of(
+            new NodoDecisionHandler(),
+            new NodoIteracionHandler(),
+            new NodoBifurcasionHandler(),
+            new NodoUnionHandler()
+    );
+
+    public List<Map<String, Object>> findAllForReport() {
+        List<Tramite> tramites = tramiteRepo.findAll();
+
+        Set<String> workflowIds = tramites.stream().map(Tramite::getWorkflowId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, Workflow> workflowMap = workflowRepo.findAllById(workflowIds).stream()
+                .collect(Collectors.toMap(Workflow::getId, w -> w));
+
+        Set<String> nodoIds = tramites.stream().map(Tramite::getCurrentNodoId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, WorkflowNodo> nodoMap = nodoRepo.findAllById(nodoIds).stream()
+                .collect(Collectors.toMap(WorkflowNodo::getId, n -> n));
+
+        Set<String> deptIds = nodoMap.values().stream()
+                .map(WorkflowNodo::getResponsibleDepartmentId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, String> deptNameMap = departmentRepo.findAllById(deptIds).stream()
+                .collect(Collectors.toMap(Department::getId, Department::getName));
+
+        Set<String> userIds = tramites.stream().map(Tramite::getRequestedById).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, String> userNameMap = userRepository.findAllById(userIds).stream()
+                .collect(Collectors.toMap(User::getId, u -> u.getName() != null ? u.getName() : u.getEmail()));
+
+        return tramites.stream().map(t -> {
+            Workflow wf = workflowMap.get(t.getWorkflowId());
+            WorkflowNodo nodo = t.getCurrentNodoId() != null ? nodoMap.get(t.getCurrentNodoId()) : null;
+            String deptName = nodo != null && nodo.getResponsibleDepartmentId() != null
+                    ? deptNameMap.get(nodo.getResponsibleDepartmentId()) : null;
+            Map<String, Object> row = new LinkedHashMap<>();
+            row.put("tramiteId", t.getId());
+            row.put("code", t.getCode());
+            row.put("title", t.getTitle());
+            row.put("workflowName", wf != null ? wf.getName() : t.getWorkflowId());
+            row.put("departmentName", deptName != null ? deptName : "");
+            row.put("status", t.getStatus() != null ? t.getStatus().name() : "");
+            row.put("userName", userNameMap.getOrDefault(t.getRequestedById(), ""));
+            row.put("createdAt", t.getCreatedAt() != null ? t.getCreatedAt().toString() : "");
+            boolean done = t.getStatus() == Tramite.Status.COMPLETADO || t.getStatus() == Tramite.Status.RECHAZADO;
+            row.put("completedAt", done && t.getUpdatedAt() != null ? t.getUpdatedAt().toString() : null);
+            return row;
+        }).toList();
+    }
+
+    public List<Tramite> findAll(User user) {
+        if (user.getRole() == User.Role.ADMIN || user.getRole() == User.Role.SUPERADMIN) {
+            return tramiteRepo.findAll();
+        }
+        if (user.getRole() == User.Role.CLIENTE) {
+            String email = user.getEmail();
+            if (email == null || email.isBlank()) return List.of();
+            return tramiteRepo.findAll().stream()
+                    .filter(p -> p.getFormData() != null &&
+                            p.getFormData().values().stream()
+                                    .anyMatch(v -> email.equalsIgnoreCase(v != null ? v.toString() : null)))
+                    .toList();
+        }
+        return tramiteRepo.findByAssignedUserIdOrRequestedById(user.getId(), user.getId());
+    }
+
+    public Map<String, Object> findOne(String id) {
+        Tramite tramite = tramiteRepo.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Tramite no encontrado"));
+        List<HistorialTramite> history = historyRepo.findByTramiteIdOrderByChangedAtAsc(tramite.getId());
+
+        boolean isActive = tramite.getStatus() != Tramite.Status.COMPLETADO
+                && tramite.getStatus() != Tramite.Status.RECHAZADO;
+        List<Tramite> activeClones = tramite.getParentTramiteId() == null && isActive
+                ? tramiteRepo.findByParentTramiteId(tramite.getId()).stream()
+                        .filter(c -> c.getStatus() != Tramite.Status.COMPLETADO
+                                && c.getStatus() != Tramite.Status.RECHAZADO
+                                && c.getCurrentNodoId() != null)
+                        .collect(Collectors.toList())
+                : List.of();
+
+        Set<String> activeNodoIds = new java.util.HashSet<>();
+        WorkflowNodo rootCurrentNodo = isActive && tramite.getCurrentNodoId() != null
+                ? nodoRepo.findById(tramite.getCurrentNodoId()).orElse(null)
+                : null;
+        boolean rootIsWaitingOnPassThrough = rootCurrentNodo != null
+                && isPassThroughNode(rootCurrentNodo)
+                && !activeClones.isEmpty();
+        if (isActive && tramite.getCurrentNodoId() != null && !rootIsWaitingOnPassThrough) {
+            activeNodoIds.add(tramite.getCurrentNodoId());
+        }
+        activeClones.forEach(c -> activeNodoIds.add(c.getCurrentNodoId()));
+
+        Set<String> allNodoIds = history.stream()
+                .filter(h -> h.getToNodoId() != null)
+                .map(HistorialTramite::getToNodoId)
+                .collect(Collectors.toSet());
+        allNodoIds.addAll(activeNodoIds);
+        Map<String, WorkflowNodo> nodoMap = nodoRepo.findAllById(allNodoIds).stream()
+                .collect(Collectors.toMap(WorkflowNodo::getId, s -> s));
+
+        Set<String> deptIds = nodoMap.values().stream()
+                .filter(s -> s.getResponsibleDepartmentId() != null)
+                .map(WorkflowNodo::getResponsibleDepartmentId)
+                .collect(Collectors.toSet());
+        Map<String, String> deptNameMap = departmentRepo.findAllById(deptIds).stream()
+                .collect(Collectors.toMap(Department::getId, Department::getName));
+
+        Set<String> roleIds = nodoMap.values().stream()
+                .filter(s -> s.getResponsibleJobRoleId() != null)
+                .map(WorkflowNodo::getResponsibleJobRoleId)
+                .collect(Collectors.toSet());
+        Map<String, String> roleNameMap = jobRoleRepo.findAllById(roleIds).stream()
+                .collect(Collectors.toMap(JobRole::getId, JobRole::getName));
+
+        Set<String> currentHistoryIds = new LinkedHashSet<>();
+        Set<String> pendingActiveNodoIds = new LinkedHashSet<>(activeNodoIds);
+        for (int index = history.size() - 1; index >= 0; index--) {
+            HistorialTramite historyEntry = history.get(index);
+            String nodoId = historyEntry.getToNodoId();
+            if (nodoId != null && pendingActiveNodoIds.remove(nodoId)) {
+                currentHistoryIds.add(historyEntry.getId());
+            }
+            if (pendingActiveNodoIds.isEmpty()) break;
+        }
+
+        Set<String> coveredNodoIds = new java.util.HashSet<>();
+        List<Map<String, Object>> enrichedHistory = new ArrayList<>();
+        for (HistorialTramite h : history) {
+            WorkflowNodo nodo = h.getToNodoId() != null ? nodoMap.get(h.getToNodoId()) : null;
+            if (nodo != null && isPassThroughNode(nodo)
+                    && ("AVANZADO".equals(h.getAction()) || "UNION_COMPLETADA".equals(h.getAction()))) {
+                continue;
+            }
+            if (h.getToNodoId() != null) coveredNodoIds.add(h.getToNodoId());
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("id", h.getId());
+            entry.put("action", h.getAction());
+            entry.put("fromNodoId", h.getFromNodoId());
+            entry.put("toNodoId", h.getToNodoId());
+            entry.put("comment", h.getComment());
+            entry.put("changedAt", h.getChangedAt());
+            entry.put("nodoName", nodo != null ? nodo.getName() : null);
+            entry.put("nodeType", nodo != null ? nodo.getNodeType() : null);
+            entry.put("departmentName", nodo != null && nodo.getResponsibleDepartmentId() != null
+                    ? deptNameMap.get(nodo.getResponsibleDepartmentId()) : null);
+            entry.put("jobRoleName", nodo != null && nodo.getResponsibleJobRoleId() != null
+                    ? roleNameMap.get(nodo.getResponsibleJobRoleId()) : null);
+            entry.put("isCurrent", currentHistoryIds.contains(h.getId()));
+            enrichedHistory.add(entry);
+        }
+
+        for (Tramite clone : activeClones) {
+            String cloneNodoId = clone.getCurrentNodoId();
+            if (coveredNodoIds.contains(cloneNodoId)) continue;
+            WorkflowNodo nodo = nodoMap.get(cloneNodoId);
+            Map<String, Object> entry = new LinkedHashMap<>();
+            entry.put("id", "branch-" + clone.getId());
+            entry.put("action", "AVANZADO");
+            entry.put("fromNodoId", null);
+            entry.put("toNodoId", cloneNodoId);
+            entry.put("comment", "Rama paralela en curso");
+            entry.put("changedAt", clone.getUpdatedAt() != null ? clone.getUpdatedAt() : clone.getCreatedAt());
+            entry.put("nodoName", nodo != null ? nodo.getName() : null);
+            entry.put("nodeType", nodo != null ? nodo.getNodeType() : null);
+            entry.put("departmentName", nodo != null && nodo.getResponsibleDepartmentId() != null
+                    ? deptNameMap.get(nodo.getResponsibleDepartmentId()) : null);
+            entry.put("jobRoleName", nodo != null && nodo.getResponsibleJobRoleId() != null
+                    ? roleNameMap.get(nodo.getResponsibleJobRoleId()) : null);
+            entry.put("isCurrent", true);
+            enrichedHistory.add(entry);
+            coveredNodoIds.add(cloneNodoId);
+        }
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", tramite.getId());
+        map.put("code", tramite.getCode());
+        map.put("title", tramite.getTitle());
+        map.put("description", tramite.getDescription());
+        map.put("status", tramite.getStatus());
+        map.put("workflowId", tramite.getWorkflowId());
+        map.put("currentNodoId", tramite.getCurrentNodoId());
+        map.put("requestedById", tramite.getRequestedById());
+        map.put("assignedUserId", tramite.getAssignedUserId());
+        map.put("formData", tramite.getFormData());
+        map.put("createdAt", tramite.getCreatedAt());
+        map.put("updatedAt", tramite.getUpdatedAt());
+        map.put("history", enrichedHistory);
+        return map;
+    }
+
+    public List<Map<String, Object>> listActivities(User actor) {
+        List<Tramite> tramites = tramiteRepo.findAll();
+
+        Set<String> workflowIds = tramites.stream().map(Tramite::getWorkflowId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, Workflow> workflowMap = workflowRepo.findAllById(workflowIds).stream()
+                .collect(Collectors.toMap(Workflow::getId, workflow -> workflow));
+
+        Set<String> nodoIds = tramites.stream().map(Tramite::getCurrentNodoId).filter(Objects::nonNull).collect(Collectors.toSet());
+        Map<String, WorkflowNodo> nodoMap = nodoRepo.findAllById(nodoIds).stream()
+                .collect(Collectors.toMap(WorkflowNodo::getId, nodo -> nodo));
+
+        return tramites.stream()
+                .filter(tramite -> tramite.getStatus() != Tramite.Status.COMPLETADO && tramite.getStatus() != Tramite.Status.RECHAZADO)
+                .map(tramite -> Map.entry(tramite, workflowMap.get(tramite.getWorkflowId())))
+                .filter(entry -> entry.getValue() != null && hasWorkflowAccess(actor, entry.getValue()))
+                .map(entry -> Map.entry(entry.getKey(), nodoMap.get(entry.getKey().getCurrentNodoId())))
+                .filter(entry -> entry.getValue() != null
+                        && !isPassThroughNode(entry.getValue())
+                        && (matchesNodoResponsibility(entry.getValue(), actor) || documentAccessService.hasAnyAccess(entry.getValue(), actor)))
+                .map(entry -> {
+                    Tramite tramite = entry.getKey();
+                    WorkflowNodo nodo = entry.getValue();
+                    Workflow workflow = workflowMap.get(tramite.getWorkflowId());
+                    Map<String, Object> map = new LinkedHashMap<>();
+                    map.put("id", tramite.getId());
+                    map.put("code", tramite.getCode());
+                    map.put("title", tramite.getTitle());
+                    map.put("status", tramite.getStatus());
+                    map.put("workflowId", workflow.getId());
+                    map.put("workflowName", workflow.getName());
+                    map.put("currentNodoId", nodo.getId());
+                    map.put("currentNodoName", nodo.getName());
+                    map.put("createdAt", tramite.getCreatedAt());
+                    map.put("updatedAt", tramite.getUpdatedAt());
+                    return map;
+                })
+                .sorted((a, b) -> {
+                    java.time.Instant ia = toInstant(a.get("createdAt"));
+                    java.time.Instant ib = toInstant(b.get("createdAt"));
+                    return ib.compareTo(ia);
+                })
+                .toList();
+    }
+
+    public Map<String, Object> findActivity(String id, User actor) {
+        Tramite tramite = tramiteRepo.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Actividad no encontrada"));
+        Workflow workflow = workflowRepo.findById(tramite.getWorkflowId()).orElse(null);
+        if (workflow == null || !hasWorkflowAccess(actor, workflow)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes acceso a esta actividad");
+        }
+
+        WorkflowNodo currentNodo = nodoRepo.findById(tramite.getCurrentNodoId()).orElse(null);
+        boolean canAdvance = currentNodo != null && matchesNodoResponsibility(currentNodo, actor);
+        boolean hasDocumentAccess = currentNodo != null && documentAccessService.hasAnyAccess(currentNodo, actor);
+        if (currentNodo == null || isPassThroughNode(currentNodo) || (!canAdvance && !hasDocumentAccess)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes acceso a esta actividad");
+        }
+
+        List<HistorialTramite> history = historyRepo.findByTramiteIdOrderByChangedAtAsc(tramite.getId());
+        List<WorkflowTransition> transitions = transitionRepo.findByWorkflowIdOrderByCreatedAtAsc(workflow.getId());
+        FormDefinition formDefinition = formRepo.findByNodoId(currentNodo.getId()).orElse(null);
+
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("id", tramite.getId());
+        map.put("code", tramite.getCode());
+        map.put("title", tramite.getTitle());
+        map.put("description", tramite.getDescription());
+        map.put("status", tramite.getStatus());
+        map.put("workflowId", workflow.getId());
+        map.put("workflowName", workflow.getName());
+        map.put("currentNodoId", currentNodo.getId());
+        map.put("currentNodoName", currentNodo.getName());
+        map.put("formData", tramite.getFormData());
+        map.put("createdAt", tramite.getCreatedAt());
+        map.put("updatedAt", tramite.getUpdatedAt());
+        map.put("history", history);
+        map.put("formDefinition", formDefinition);
+        map.put("availableTransitions", buildAvailableTransitions(currentNodo, transitions));
+        map.put("incomingData", buildIncomingData(tramite, currentNodo, transitions));
+        map.put("canAdvance", canAdvance);
+        map.put("documentAccess", documentAccessService.resolvePermissions(currentNodo, actor));
+        return map;
+    }
+
+    public Map<String, Object> createAndSubmit(Map<String, Object> body, User requestedBy) {
+        Tramite created = createInternal(body, requestedBy);
+        @SuppressWarnings("unchecked")
+        List<String> autoTransitionIds = (List<String>) body.getOrDefault("autoTransitionIds", List.of());
+
+        if (autoTransitionIds == null || autoTransitionIds.isEmpty()) {
+            reportRealtimeService.scheduleDashboardUpdate();
+            return findOne(created.getId());
+        }
+
+        Map<String, Object> latest = null;
+        for (String transitionId : autoTransitionIds) {
+            if (transitionId == null || transitionId.isBlank()) continue;
+            Map<String, Object> advanceBody = new LinkedHashMap<>();
+            advanceBody.put("transitionId", transitionId);
+            advanceBody.put("comment", body.getOrDefault("comment", "Envio automatico del tramite"));
+            if (Objects.equals(transitionId, autoTransitionIds.get(autoTransitionIds.size() - 1))) {
+                advanceBody.put("formData", body.get("formData"));
+            }
+            latest = advanceInternal(created.getId(), advanceBody, requestedBy, false, false);
+        }
+
+        reportRealtimeService.scheduleDashboardUpdate();
+        return latest != null ? latest : findOne(created.getId());
+    }
+
+    private Tramite createInternal(Map<String, Object> body, User requestedBy) {
+        Workflow workflow = workflowRepo.findById((String) body.get("workflowId"))
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Workflow no encontrado"));
+
+        List<WorkflowNodo> nodos = nodoRepo.findByWorkflowIdOrderByOrderAsc(workflow.getId());
+        if (nodos.isEmpty()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El workflow no tiene etapas");
+        }
+        List<WorkflowTransition> transitions = transitionRepo.findByWorkflowIdOrderByCreatedAtAsc(workflow.getId());
+        validateWorkflowStartAndEnd(nodos, transitions);
+        WorkflowNodo initialNodo = nodos.stream()
+                .filter(nodo -> "inicio".equalsIgnoreCase(nodo.getNodeType()))
+                .findFirst()
+                .orElse(nodos.get(0));
+
+        Tramite tramite = new Tramite();
+        tramite.setCode(generateCode());
+        tramite.setTitle((String) body.get("title"));
+        tramite.setDescription((String) body.get("description"));
+        tramite.setWorkflowId(workflow.getId());
+        tramite.setCurrentNodoId(initialNodo.getId());
+        tramite.setRequestedById(requestedBy.getId());
+        tramite.setStatus(Tramite.Status.PENDIENTE);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> formData = (Map<String, Object>) body.getOrDefault("formData", new LinkedHashMap<>());
+        tramite.setFormData(new LinkedHashMap<>(formData));
+
+        Tramite saved = tramiteRepo.save(tramite);
+        recordHistory(saved.getId(), null, initialNodo.getId(), "CREADO", requestedBy.getId(), "Tramite creado");
+        auditFileChanges(null, saved.getFormData(), saved, initialNodo, requestedBy);
+
+        // Renombrar carpeta S3 de UUID → code del trámite
+        String tramiteFolder = (String) body.get("tramiteFolder");
+        if (tramiteFolder != null && !tramiteFolder.isBlank()) {
+            String newFolder = saved.getCode();
+            fileStorageService.moveTramiteFolder(workflow.getName(), tramiteFolder, newFolder);
+            Map<String, Object> updatedFormData = new LinkedHashMap<>(
+                    saved.getFormData() != null ? saved.getFormData() : new LinkedHashMap<>());
+            updateTramiteFolderInFormData(updatedFormData, tramiteFolder, newFolder, workflow.getName());
+            saved.setFormData(updatedFormData);
+            saved = tramiteRepo.save(saved);
+        }
+
+        return saved;
+    }
+
+    @SuppressWarnings("unchecked")
+    private void updateTramiteFolderInFormData(Map<String, Object> formData,
+                                               String oldFolder, String newFolder,
+                                               String workflowName) {
+        for (Map.Entry<String, Object> entry : formData.entrySet()) {
+            Object val = entry.getValue();
+            if (val instanceof Map) {
+                patchFileEntry((Map<String, Object>) val, oldFolder, newFolder, workflowName);
+            } else if (val instanceof List) {
+                for (Object item : (List<Object>) val) {
+                    if (item instanceof Map) {
+                        patchFileEntry((Map<String, Object>) item, oldFolder, newFolder, workflowName);
+                    }
+                }
+            }
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    private void patchFileEntry(Map<String, Object> fileMap, String oldFolder, String newFolder, String workflowName) {
+        if (!oldFolder.equals(fileMap.get("tramiteFolder"))) return;
+        fileMap.put("tramiteFolder", newFolder);
+        String storedName = (String) fileMap.get("storedName");
+        String fileName   = (String) fileMap.get("fileName");
+        if (storedName != null) {
+            String newUrl = fileStorageService.presignUrl(storedName, workflowName, newFolder, fileName);
+            if (newUrl != null) fileMap.put("downloadPath", newUrl);
+        }
+    }
+
+    private void validateWorkflowStartAndEnd(List<WorkflowNodo> nodos, List<WorkflowTransition> transitions) {
+        Map<String, WorkflowNodo> nodoById = nodos.stream().collect(Collectors.toMap(WorkflowNodo::getId, nodo -> nodo));
+
+        boolean hasInicioAProceso = transitions.stream().anyMatch(transition -> {
+            WorkflowNodo fromNodo = nodoById.get(transition.getFromNodoId());
+            WorkflowNodo toNodo = nodoById.get(transition.getToNodoId());
+            return fromNodo != null
+                    && toNodo != null
+                    && "inicio".equalsIgnoreCase(fromNodo.getNodeType())
+                    && "proceso".equalsIgnoreCase(toNodo.getNodeType());
+        });
+
+        boolean hasProcesoAFin = transitions.stream().anyMatch(transition -> {
+            WorkflowNodo fromNodo = nodoById.get(transition.getFromNodoId());
+            WorkflowNodo toNodo = nodoById.get(transition.getToNodoId());
+            return fromNodo != null
+                    && toNodo != null
+                    && "proceso".equalsIgnoreCase(fromNodo.getNodeType())
+                    && "fin".equalsIgnoreCase(toNodo.getNodeType());
+        });
+
+        if (!hasInicioAProceso || !hasProcesoAFin) {
+            throw new ResponseStatusException(
+                    HttpStatus.BAD_REQUEST,
+                    "El workflow debe tener un Inicio conectado a un Proceso y un Proceso conectado a un Fin"
+            );
+        }
+    }
+
+    public Map<String, Object> advance(String id, Map<String, Object> body, User user) {
+        return advanceInternal(id, body, user, true, true);
+    }
+
+    public Map<String, Object> parseVoiceFill(String id, Map<String, Object> body, User actor) {
+        Tramite tramite = tramiteRepo.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Actividad no encontrada"));
+        Workflow workflow = workflowRepo.findById(tramite.getWorkflowId()).orElse(null);
+        if (workflow == null || !hasWorkflowAccess(actor, workflow)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes acceso a esta actividad");
+        }
+
+        WorkflowNodo currentNodo = nodoRepo.findById(tramite.getCurrentNodoId()).orElse(null);
+        if (currentNodo == null || isPassThroughNode(currentNodo) || !matchesNodoResponsibility(currentNodo, actor)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes acceso a esta actividad");
+        }
+
+        String transcript = String.valueOf(body.getOrDefault("transcript", "")).trim();
+        if (transcript.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes enviar el texto reconocido");
+        }
+
+        FormDefinition formDefinition = formRepo.findByNodoId(currentNodo.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "La actividad actual no tiene formulario"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> currentFormData = (Map<String, Object>) body.get("formData");
+        Map<String, Object> result = parseVoiceTranscript(
+                transcript,
+                formDefinition,
+                currentFormData != null ? currentFormData : tramite.getFormData()
+        );
+        result.put("activityId", tramite.getId());
+        result.put("currentNodoId", currentNodo.getId());
+        return result;
+    }
+
+    public Map<String, Object> parseVoiceFillForCreate(Map<String, Object> body, User actor) {
+        String workflowId = String.valueOf(body.getOrDefault("workflowId", "")).trim();
+        if (workflowId.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "workflowId es obligatorio");
+        }
+
+        Workflow workflow = workflowRepo.findById(workflowId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Workflow no encontrado"));
+        if (!hasWorkflowAccess(actor, workflow)) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes acceso a este workflow");
+        }
+
+        String transcript = String.valueOf(body.getOrDefault("transcript", "")).trim();
+        if (transcript.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes enviar el texto reconocido");
+        }
+
+        List<WorkflowNodo> nodos = nodoRepo.findByWorkflowIdOrderByOrderAsc(workflow.getId());
+        List<WorkflowTransition> transitions = transitionRepo.findByWorkflowIdOrderByCreatedAtAsc(workflow.getId());
+        WorkflowNodo entryNodo = resolveEntryNodo(nodos, transitions);
+        if (entryNodo == null) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "El workflow no tiene una etapa inicial valida");
+        }
+
+        FormDefinition formDefinition = formRepo.findByNodoId(entryNodo.getId())
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "La etapa inicial no tiene formulario"));
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> currentFormData = (Map<String, Object>) body.getOrDefault("formData", Map.of());
+        Map<String, Object> result = parseVoiceTranscript(transcript, formDefinition, currentFormData);
+        result.put("workflowId", workflow.getId());
+        result.put("currentNodoId", entryNodo.getId());
+        return result;
+    }
+
+    private Map<String, Object> advanceInternal(String id, Map<String, Object> body, User user, boolean publishReports, boolean enforceResponsibility) {
+        Tramite tramite = tramiteRepo.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Tramite no encontrado"));
+        String userId = user.getId();
+        WorkflowNodo currentNodo = nodoRepo.findById(tramite.getCurrentNodoId()).orElse(null);
+        if (enforceResponsibility && (currentNodo == null || !matchesNodoResponsibility(currentNodo, user))) {
+            throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes permisos para avanzar esta actividad");
+        }
+
+        String transitionId = (String) body.get("transitionId");
+        String[] transitionPath = transitionId == null ? new String[0] : transitionId.split(">>");
+        WorkflowTransition transition = transitionRepo.findById(transitionPath.length > 0 ? transitionPath[0] : transitionId)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Transicion no encontrada"));
+        List<WorkflowTransition> workflowTransitions = transitionRepo.findByWorkflowIdOrderByCreatedAtAsc(tramite.getWorkflowId());
+
+        if (!transition.getFromNodoId().equals(tramite.getCurrentNodoId())) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Transicion invalida para la etapa actual");
+        }
+
+        String previousNodoId = tramite.getCurrentNodoId();
+        WorkflowNodo previousNodo = currentNodo;
+        Map<String, Object> previousFormData = tramite.getFormData() == null ? Map.of() : new LinkedHashMap<>(tramite.getFormData());
+        AdvanceCursor advanceCursor = new AdvanceCursor(
+                transition,
+                nodoRepo.findById(transition.getToNodoId()).orElse(null),
+                nodoRepo.findById(transition.getToNodoId()).orElse(null),
+                "AVANZADO",
+                1
+        );
+        while (advanceCursor.toNodo != null) {
+            NodoTipoHandler handler = findNodoTipoHandler(advanceCursor.toNodo);
+            if (!handler.consumeAdvance(advanceCursor, transitionPath, workflowTransitions)) {
+                break;
+            }
+        }
+
+        tramite.setCurrentNodoId(advanceCursor.finalTransition.getToNodoId());
+        boolean isFinal = advanceCursor.toNodo != null && "fin".equalsIgnoreCase(advanceCursor.toNodo.getNodeType());
+        tramite.setStatus(isFinal ? Tramite.Status.COMPLETADO : Tramite.Status.EN_PROGRESO);
+
+        @SuppressWarnings("unchecked")
+        Map<String, Object> formData = (Map<String, Object>) body.get("formData");
+        if (formData != null) {
+            ensureDocumentEditAllowed(previousNodo, previousFormData, formData, user);
+            Map<String, Object> merged = new LinkedHashMap<>();
+            if (tramite.getFormData() != null) merged.putAll(tramite.getFormData());
+            merged.putAll(formData);
+            tramite.setFormData(merged);
+        }
+
+        String comment = (String) body.getOrDefault("comment", "");
+        Tramite saved = tramiteRepo.save(tramite);
+        String resolvedFromNodoId = advanceCursor.passThroughNodo != null && isPassThroughNode(advanceCursor.passThroughNodo)
+                ? advanceCursor.passThroughNodo.getId()
+                : previousNodoId;
+        boolean recordsEvaluationAndAdvance = "DECISION_RECHAZADA".equals(advanceCursor.transitionHistoryAction)
+                || "LOOP_RECHAZADO".equals(advanceCursor.transitionHistoryAction)
+                || "LOOP_APROBADO".equals(advanceCursor.transitionHistoryAction)
+                || "LOOP_EVALUADO".equals(advanceCursor.transitionHistoryAction);
+        if (recordsEvaluationAndAdvance) {
+            recordHistory(saved.getId(), previousNodoId, previousNodoId, advanceCursor.transitionHistoryAction, userId, comment);
+            recordHistory(saved.getId(), resolvedFromNodoId, advanceCursor.finalTransition.getToNodoId(), "AVANZADO", userId, comment);
+        } else {
+            recordHistory(
+                    saved.getId(),
+                    resolvedFromNodoId,
+                    advanceCursor.finalTransition.getToNodoId(),
+                    advanceCursor.transitionHistoryAction,
+                    userId,
+                    comment
+            );
+        }
+        if (isFinal) {
+            sendStatusNotification(saved, "Trámite completado",
+                    "Tu trámite " + saved.getCode() + " ha sido completado exitosamente.");
+        } else {
+            String nodoName = advanceCursor.toNodo != null ? advanceCursor.toNodo.getName() : "siguiente etapa";
+            sendStatusNotification(saved, "Trámite en progreso",
+                    "Tu trámite " + saved.getCode() + " avanzó al paso: " + nodoName + ".");
+        }
+
+        String fromNodoForBifurcasion = advanceCursor.bifurcasionPassthroughId != null ? advanceCursor.bifurcasionPassthroughId : previousNodoId;
+        handleBifurcasionSplitIfNeeded(saved, fromNodoForBifurcasion, advanceCursor.finalTransition.getId(), userId);
+
+        if (hasNodeType(advanceCursor.toNodo, "union")) {
+            handleJoinSyncIfNeeded(saved, advanceCursor.toNodo, userId);
+        }
+
+        if (publishReports) {
+            reportRealtimeService.scheduleDashboardUpdate();
+        }
+        auditFileChanges(previousFormData, saved.getFormData(), saved, previousNodo, user);
+        String responseTramiteId = saved.getId();
+        if (saved.getParentTramiteId() != null && !tramiteRepo.existsById(saved.getId())) {
+            responseTramiteId = saved.getParentTramiteId();
+        }
+        return findOne(responseTramiteId);
+    }
+
+    private void handleBifurcasionSplitIfNeeded(Tramite tramite, String fromNodoId, String usedTransitionId, String userId) {
+        WorkflowNodo fromNodo = nodoRepo.findById(fromNodoId).orElse(null);
+        if (fromNodo == null || !hasNodeType(fromNodo, "bifurcasion")) return;
+
+        List<WorkflowTransition> allTransitions = transitionRepo.findByWorkflowIdOrderByCreatedAtAsc(tramite.getWorkflowId());
+        List<WorkflowTransition> otherBranches = allTransitions.stream()
+                .filter(t -> fromNodoId.equals(t.getFromNodoId()) && !usedTransitionId.equals(t.getId()))
+                .toList();
+
+        for (WorkflowTransition branch : otherBranches) {
+            Tramite clone = new Tramite();
+            clone.setCode(generateCode());
+            clone.setTitle(tramite.getTitle());
+            clone.setDescription(tramite.getDescription());
+            clone.setWorkflowId(tramite.getWorkflowId());
+            clone.setCurrentNodoId(branch.getToNodoId());
+            clone.setRequestedById(tramite.getRequestedById());
+            clone.setAssignedUserId(tramite.getAssignedUserId());
+            clone.setStatus(Tramite.Status.EN_PROGRESO);
+            String rootId = tramite.getParentTramiteId() != null ? tramite.getParentTramiteId() : tramite.getId();
+            clone.setParentTramiteId(rootId);
+            if (tramite.getFormData() != null) clone.setFormData(new LinkedHashMap<>(tramite.getFormData()));
+
+            Tramite savedClone = tramiteRepo.save(clone);
+            recordHistory(savedClone.getId(), fromNodoId, branch.getToNodoId(),
+                    "BIFURCACION", userId, "Rama creada por bifurcacion desde " + fromNodo.getName());
+            recordHistory(rootId, fromNodoId, branch.getToNodoId(), "AVANZADO", userId, "Rama paralela en curso");
+        }
+    }
+
+    public Tramite reject(String id, Map<String, Object> body, String userId) {
+        Tramite tramite = tramiteRepo.findById(id)
+                .orElseThrow(() -> new ResponseStatusException(HttpStatus.NOT_FOUND, "Tramite no encontrado"));
+        tramite.setStatus(Tramite.Status.RECHAZADO);
+        Tramite saved = tramiteRepo.save(tramite);
+        String reason = (String) body.getOrDefault("reason", "Rechazado");
+        recordHistory(saved.getId(), tramite.getCurrentNodoId(), null, "RECHAZADO", userId, reason);
+        sendStatusNotification(saved, "Trámite rechazado", "Tu trámite " + saved.getCode() + " ha sido rechazado.");
+        reportRealtimeService.scheduleDashboardUpdate();
+        return saved;
+    }
+
+    private void sendStatusNotification(Tramite tramite, String title, String body) {
+        notificationHelper.sendStatusNotification(tramite, title, body);
+    }
+
+    private String generateCode() {
+        long count = tramiteRepo.count() + 1;
+        return "TRM" + String.format("%05d", count);
+    }
+
+    private void ensureDocumentEditAllowed(WorkflowNodo nodo,
+                                           Map<String, Object> previousFormData,
+                                           Map<String, Object> incomingPatch,
+                                           User actor) {
+        if (nodo == null || actor == null || incomingPatch == null || incomingPatch.isEmpty()) {
+            return;
+        }
+        Map<String, List<DocumentAccessService.StoredFileReference>> previousByField = documentAccessService.extractStoredFiles(previousFormData).stream()
+                .collect(Collectors.groupingBy(DocumentAccessService.StoredFileReference::fieldName, LinkedHashMap::new, Collectors.toList()));
+
+        for (Map.Entry<String, Object> entry : incomingPatch.entrySet()) {
+            Map<String, Object> nextFieldMap = new LinkedHashMap<>();
+            nextFieldMap.put(entry.getKey(), entry.getValue());
+            List<DocumentAccessService.StoredFileReference> nextFiles = documentAccessService.extractStoredFiles(nextFieldMap).stream().toList();
+            if (nextFiles.isEmpty() && !previousByField.containsKey(entry.getKey())) {
+                continue;
+            }
+            List<DocumentAccessService.StoredFileReference> previousFiles = previousByField.getOrDefault(entry.getKey(), List.of());
+            boolean hasPrevious = !previousFiles.isEmpty();
+            boolean changed = !new LinkedHashSet<>(previousFiles).equals(new LinkedHashSet<>(nextFiles));
+            if (!changed) {
+                continue;
+            }
+            DocumentAccessService.PermissionType requiredPermission = hasPrevious
+                    ? DocumentAccessService.PermissionType.EDIT
+                    : DocumentAccessService.PermissionType.CREATE;
+            if (!documentAccessService.hasPermission(nodo, actor, requiredPermission)) {
+                throw new ResponseStatusException(HttpStatus.FORBIDDEN, "No tienes permisos para modificar documentos en esta etapa");
+            }
+        }
+    }
+
+    private void auditFileChanges(Map<String, Object> previousFormData,
+                                  Map<String, Object> currentFormData,
+                                  Tramite tramite,
+                                  WorkflowNodo nodo,
+                                  User actor) {
+        if (tramite == null || nodo == null || actor == null) {
+            return;
+        }
+        Map<String, List<DocumentAccessService.StoredFileReference>> previousByField = documentAccessService.extractStoredFiles(previousFormData).stream()
+                .collect(Collectors.groupingBy(DocumentAccessService.StoredFileReference::fieldName, LinkedHashMap::new, Collectors.toList()));
+        Map<String, List<DocumentAccessService.StoredFileReference>> currentByField = documentAccessService.extractStoredFiles(currentFormData).stream()
+                .collect(Collectors.groupingBy(DocumentAccessService.StoredFileReference::fieldName, LinkedHashMap::new, Collectors.toList()));
+
+        Set<String> fields = new LinkedHashSet<>();
+        fields.addAll(previousByField.keySet());
+        fields.addAll(currentByField.keySet());
+
+        for (String fieldName : fields) {
+            List<DocumentAccessService.StoredFileReference> previousFiles = previousByField.getOrDefault(fieldName, List.of());
+            List<DocumentAccessService.StoredFileReference> currentFiles = currentByField.getOrDefault(fieldName, List.of());
+            Set<String> previousStoredNames = previousFiles.stream().map(DocumentAccessService.StoredFileReference::storedName).collect(Collectors.toSet());
+            Set<String> currentStoredNames = currentFiles.stream().map(DocumentAccessService.StoredFileReference::storedName).collect(Collectors.toSet());
+
+            for (DocumentAccessService.StoredFileReference file : currentFiles) {
+                if (previousStoredNames.contains(file.storedName())) {
+                    continue;
+                }
+                if (previousFiles.isEmpty()) {
+                    documentAccessService.recordCreated(tramite.getId(), tramite.getWorkflowId(), nodo.getId(), file, actor);
+                } else {
+                    documentAccessService.recordUpdated(tramite.getId(), tramite.getWorkflowId(), nodo.getId(), file, actor);
+                }
+            }
+            for (DocumentAccessService.StoredFileReference file : previousFiles) {
+                if (!currentStoredNames.contains(file.storedName())) {
+                    documentAccessService.recordDeleted(tramite.getId(), tramite.getWorkflowId(), nodo.getId(), file, actor);
+                }
+            }
+        }
+    }
+
+    private void recordHistory(String tramiteId, String fromNodoId, String toNodoId,
+                               String action, String changedById, String comment) {
+        HistorialTramite history = new HistorialTramite();
+        history.setTramiteId(tramiteId);
+        history.setFromNodoId(fromNodoId);
+        history.setToNodoId(toNodoId);
+        history.setAction(action);
+        history.setChangedById(changedById);
+        history.setComment(comment);
+        historyRepo.save(history);
+    }
+
+    private List<Map<String, Object>> buildAvailableTransitions(WorkflowNodo currentNodo, List<WorkflowTransition> transitions) {
+        List<Map<String, Object>> available = new ArrayList<>();
+        for (WorkflowTransition transition : transitions) {
+            if (!currentNodo.getId().equals(transition.getFromNodoId())) continue;
+            WorkflowNodo directTarget = nodoRepo.findById(transition.getToNodoId()).orElse(null);
+            List<Map<String, Object>> expandedOptions = findNodoTipoHandler(directTarget)
+                    .buildTransitionOptions(transition, directTarget, transitions);
+            if (!expandedOptions.isEmpty()) {
+                available.addAll(expandedOptions);
+                continue;
+            }
+            Map<String, Object> option = new LinkedHashMap<>();
+            option.put("id", transition.getId());
+            option.put("name", transition.getName());
+            option.put("label", transition.getName());
+            option.put("fromNodoId", transition.getFromNodoId());
+            option.put("toNodoId", transition.getToNodoId());
+            option.put("targetNodoName", directTarget != null ? directTarget.getName() : transition.getToNodoId());
+            option.put("tipo", "transicion");
+            available.add(option);
+        }
+        return available;
+    }
+
+    private List<Map<String, Object>> buildIncomingData(Tramite tramite, WorkflowNodo currentNodo, List<WorkflowTransition> transitions) {
+        Map<String, Object> tramiteData = tramite.getFormData() == null ? Map.of() : tramite.getFormData();
+        List<Map<String, Object>> incomingData = new ArrayList<>();
+        for (WorkflowTransition transition : transitions) {
+            if (!currentNodo.getId().equals(transition.getToNodoId())) continue;
+            WorkflowNodo sourceNodo = nodoRepo.findById(transition.getFromNodoId()).orElse(null);
+            if (sourceNodo == null) continue;
+            List<Map<String, Object>> fields = buildSharedFields(sourceNodo, transition, tramiteData, transitions, new LinkedHashSet<>());
+            if (fields.isEmpty()) continue;
+            Map<String, Object> incoming = new LinkedHashMap<>();
+            incoming.put("transitionId", transition.getId());
+            incoming.put("transitionName", transition.getName());
+            incoming.put("fromNodoName", sourceNodo.getName());
+            incoming.put("fields", fields);
+            incomingData.add(incoming);
+        }
+        return incomingData;
+    }
+
+    private WorkflowNodo resolveEntryNodo(List<WorkflowNodo> nodos, List<WorkflowTransition> transitions) {
+        if (nodos == null || nodos.isEmpty()) {
+            return null;
+        }
+        WorkflowNodo initialNodo = nodos.stream()
+                .filter(nodo -> "inicio".equalsIgnoreCase(nodo.getNodeType()))
+                .findFirst()
+                .orElse(null);
+        WorkflowNodo firstWorkNodo = nodos.stream()
+                .filter(nodo -> !"inicio".equalsIgnoreCase(nodo.getNodeType()))
+                .findFirst()
+                .orElse(initialNodo);
+        if (initialNodo == null) {
+            return firstWorkNodo;
+        }
+        WorkflowTransition startTransition = transitions.stream()
+                .filter(transition -> initialNodo.getId().equals(transition.getFromNodoId()))
+                .findFirst()
+                .orElse(null);
+        if (startTransition == null) {
+            return firstWorkNodo;
+        }
+        return nodos.stream()
+                .filter(nodo -> startTransition.getToNodoId().equals(nodo.getId()))
+                .findFirst()
+                .orElse(firstWorkNodo);
+    }
+
+    private Map<String, Object> parseVoiceTranscript(String transcript,
+                                                     FormDefinition formDefinition,
+                                                     Map<String, Object> currentFormData) {
+        Map<String, Object> current = currentFormData == null ? Map.of() : currentFormData;
+        Map<String, Object> aiResult = workflowAiProxyService.formVoiceFill(Map.of(
+                "transcript", transcript,
+                "formDefinition", formFieldHelper.toFormDefinitionPayload(formDefinition),
+                "currentFormData", current
+        ));
+        return formFieldHelper.normalizeAiVoiceResult(transcript, current, aiResult);
+    }
+
+    private List<Map<String, Object>> buildSharedFields(WorkflowNodo sourceNodo, WorkflowTransition transition,
+                                                        Map<String, Object> tramiteData,
+                                                        List<WorkflowTransition> transitions, Set<String> visitedNodoIds) {
+        return formFieldHelper.buildSharedFields(sourceNodo, transition, tramiteData, transitions, visitedNodoIds);
+    }
+
+
+    private java.time.Instant toInstant(Object v) {
+        if (v == null) return java.time.Instant.EPOCH;
+        if (v instanceof java.time.Instant i) return i;
+        if (v instanceof java.time.LocalDateTime ldt) return ldt.toInstant(java.time.ZoneOffset.UTC);
+        try { return java.time.Instant.parse(v.toString()); } catch (Exception ignored) {}
+        return java.time.Instant.EPOCH;
+    }
+
+    private boolean hasWorkflowAccess(User actor, Workflow workflow) {
+        if (actor.getRole() == User.Role.SUPERADMIN) return true;
+        return actor.getCompanyId() != null && actor.getCompanyId().equals(workflow.getCompanyId());
+    }
+
+    private boolean matchesNodoResponsibility(WorkflowNodo nodo, User actor) {
+        boolean hasJobRole = nodo.getResponsibleJobRoleId() != null && !nodo.getResponsibleJobRoleId().isBlank();
+        boolean hasDepartment = nodo.getResponsibleDepartmentId() != null && !nodo.getResponsibleDepartmentId().isBlank();
+        boolean hasRole = nodo.getResponsibleRole() != null;
+
+        if (hasJobRole) {
+            boolean matchesJobRole = nodo.getResponsibleJobRoleId().equals(actor.getJobRoleId());
+            if (!matchesJobRole) return false;
+            return !hasDepartment || (actor.getDepartmentId() != null && actor.getDepartmentId().equals(nodo.getResponsibleDepartmentId()));
+        }
+        if (hasDepartment) {
+            return actor.getDepartmentId() != null && actor.getDepartmentId().equals(nodo.getResponsibleDepartmentId());
+        }
+        if (hasRole) {
+            return actor.getRole() == nodo.getResponsibleRole();
+        }
+        return false;
+    }
+
+    private void handleJoinSyncIfNeeded(Tramite tramite, WorkflowNodo joinNodo, String userId) {
+        List<WorkflowTransition> allTransitions = transitionRepo.findByWorkflowIdOrderByCreatedAtAsc(tramite.getWorkflowId());
+        long expectedBranches = allTransitions.stream()
+                .filter(t -> joinNodo.getId().equals(t.getToNodoId()))
+                .count();
+
+        String rootId = tramite.getParentTramiteId() != null ? tramite.getParentTramiteId() : tramite.getId();
+        Tramite root = tramiteRepo.findById(rootId).orElse(null);
+        if (root == null) return;
+
+        List<Tramite> clones = tramiteRepo.findByParentTramiteId(rootId);
+        long arrivedCount = (joinNodo.getId().equals(root.getCurrentNodoId()) ? 1 : 0)
+                + clones.stream().filter(c -> joinNodo.getId().equals(c.getCurrentNodoId())).count();
+
+        if (arrivedCount < expectedBranches) return;
+
+        Map<String, Object> merged = new LinkedHashMap<>();
+        if (root.getFormData() != null) merged.putAll(root.getFormData());
+        for (Tramite clone : clones) {
+            if (clone.getFormData() != null) merged.putAll(clone.getFormData());
+        }
+        root.setFormData(merged);
+
+        WorkflowTransition nextTransition = allTransitions.stream()
+                .filter(t -> joinNodo.getId().equals(t.getFromNodoId()))
+                .findFirst().orElse(null);
+
+        if (nextTransition != null) {
+            WorkflowNodo nextNodo = nodoRepo.findById(nextTransition.getToNodoId()).orElse(null);
+            boolean isFinal = nextNodo != null && "fin".equalsIgnoreCase(nextNodo.getNodeType());
+            root.setCurrentNodoId(nextTransition.getToNodoId());
+            root.setStatus(isFinal ? Tramite.Status.COMPLETADO : Tramite.Status.EN_PROGRESO);
+            tramiteRepo.save(root);
+            recordHistory(root.getId(), joinNodo.getId(), nextTransition.getToNodoId(), "UNION_COMPLETADA", userId, "Todas las ramas completadas");
+            if (isFinal) {
+                sendStatusNotification(root, "Trámite completado",
+                        "Tu trámite " + root.getCode() + " ha sido completado exitosamente.");
+            }
+        }
+
+        clones.forEach(clone -> tramiteRepo.deleteById(clone.getId()));
+    }
+
+    private boolean isPassThroughNode(WorkflowNodo nodo) {
+        return findNodoTipoHandler(nodo).isPassThrough();
+    }
+
+    private boolean hasNodeType(WorkflowNodo nodo, String... nodeTypes) {
+        if (nodo == null || nodo.getNodeType() == null) return false;
+        String value = nodo.getNodeType().toLowerCase();
+        for (String nodeType : nodeTypes) {
+            if (value.equals(nodeType)) return true;
+        }
+        return false;
+    }
+
+    private String resolveBranchOutcome(WorkflowNodo decisionNodo, WorkflowTransition branch) {
+        if (decisionNodo == null || branch == null) return null;
+        String name = branch.getName() == null ? "" : branch.getName().trim().toLowerCase();
+        if (hasNodeType(decisionNodo, "iteracion")) {
+            if (name.equals("repetir")) return "rechazo";
+            if (name.equals("salir")) return "aceptacion";
+        } else if (hasNodeType(decisionNodo, "decision")) {
+            if (name.equals("si") || name.equals("sí") || name.equals("aprobado") || name.equals("aceptado")) return "aceptacion";
+            if (name.equals("no") || name.equals("rechazado") || name.equals("rechazar")) return "rechazo";
+        }
+        return null;
+    }
+
+    private NodoTipoHandler findNodoTipoHandler(WorkflowNodo nodo) {
+        if (nodo == null) {
+            return NodoTipoHandler.DEFAULT;
+        }
+        return nodoTipoHandlers.stream()
+                .filter(handler -> handler.supports(nodo))
+                .findFirst()
+                .orElse(NodoTipoHandler.DEFAULT);
+    }
+
+    private static final class AdvanceCursor {
+        private WorkflowTransition finalTransition;
+        private WorkflowNodo passThroughNodo;
+        private WorkflowNodo toNodo;
+        private String bifurcasionPassthroughId;
+        private String transitionHistoryAction;
+        private int transitionPathIndex;
+
+        private AdvanceCursor(WorkflowTransition finalTransition,
+                              WorkflowNodo passThroughNodo,
+                              WorkflowNodo toNodo,
+                              String transitionHistoryAction,
+                              int transitionPathIndex) {
+            this.finalTransition = finalTransition;
+            this.passThroughNodo = passThroughNodo;
+            this.toNodo = toNodo;
+            this.transitionHistoryAction = transitionHistoryAction;
+            this.transitionPathIndex = transitionPathIndex;
+        }
+    }
+
+    private abstract static class NodoTipoHandler {
+        private static final NodoTipoHandler DEFAULT = new NodoTipoHandler() {
+            @Override
+            boolean supports(WorkflowNodo nodo) {
+                return true;
+            }
+        };
+
+        abstract boolean supports(WorkflowNodo nodo);
+
+        boolean isPassThrough() {
+            return false;
+        }
+
+        boolean consumeAdvance(AdvanceCursor cursor, String[] transitionPath, List<WorkflowTransition> workflowTransitions) {
+            return false;
+        }
+
+        List<Map<String, Object>> buildTransitionOptions(WorkflowTransition transition, WorkflowNodo directTarget,
+                                                         List<WorkflowTransition> transitions) {
+            return List.of();
+        }
+
+        String resolveBranchOutcome(WorkflowTransition branch) {
+            return null;
+        }
+    }
+
+    private abstract class NodoDecisionBaseHandler extends NodoTipoHandler {
+        @Override
+        boolean isPassThrough() {
+            return true;
+        }
+
+        @Override
+        boolean consumeAdvance(AdvanceCursor cursor, String[] transitionPath, List<WorkflowTransition> workflowTransitions) {
+            if (transitionPath.length <= cursor.transitionPathIndex) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Debes elegir una rama de la decision");
+            }
+            cursor.passThroughNodo = cursor.toNodo;
+            cursor.finalTransition = transitionRepo.findById(transitionPath[cursor.transitionPathIndex])
+                    .orElseThrow(() -> new ResponseStatusException(HttpStatus.BAD_REQUEST, "Rama de decision no encontrada"));
+            cursor.transitionPathIndex++;
+            if (!cursor.passThroughNodo.getId().equals(cursor.finalTransition.getFromNodoId())) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "Rama de decision invalida");
+            }
+            cursor.transitionHistoryAction = resolveTransitionHistoryAction(cursor.finalTransition);
+            cursor.toNodo = nodoRepo.findById(cursor.finalTransition.getToNodoId()).orElse(null);
+            return true;
+        }
+
+        @Override
+        List<Map<String, Object>> buildTransitionOptions(WorkflowTransition transition, WorkflowNodo directTarget,
+                                                         List<WorkflowTransition> transitions) {
+            List<Map<String, Object>> options = new ArrayList<>();
+            for (WorkflowTransition branch : transitions) {
+                if (!directTarget.getId().equals(branch.getFromNodoId())) continue;
+                WorkflowNodo finalTarget = nodoRepo.findById(branch.getToNodoId()).orElse(null);
+                Map<String, Object> option = new LinkedHashMap<>();
+                option.put("id", transition.getId() + ">>" + branch.getId());
+                option.put("name", branch.getName());
+                option.put("label", branch.getName());
+                option.put("fromNodoId", transition.getFromNodoId());
+                option.put("toNodoId", branch.getToNodoId());
+                option.put("nodoDecisionId", directTarget.getId());
+                option.put("nodoDecisionNombre", directTarget.getName());
+                option.put("tipoNodoDecision", directTarget.getNodeType());
+                option.put("resultadoRama", resolveBranchOutcome(branch));
+                option.put("targetNodoName", finalTarget != null ? finalTarget.getName() : branch.getToNodoId());
+                option.put("tipo", "rama-decision");
+                options.add(option);
+            }
+            return options;
+        }
+
+        abstract String resolveTransitionHistoryAction(WorkflowTransition transition);
+    }
+
+    private final class NodoDecisionHandler extends NodoDecisionBaseHandler {
+        @Override
+        boolean supports(WorkflowNodo nodo) {
+            return hasNodeType(nodo, "decision");
+        }
+
+        @Override
+        String resolveTransitionHistoryAction(WorkflowTransition transition) {
+            return "rechazo".equals(resolveBranchOutcome(transition)) ? "DECISION_RECHAZADA" : "AVANZADO";
+        }
+
+        @Override
+        String resolveBranchOutcome(WorkflowTransition branch) {
+            String name = branch.getName() == null ? "" : branch.getName().trim().toLowerCase();
+            if (name.equals("si") || name.equals("sí") || name.equals("aprobado") || name.equals("aceptado")) return "aceptacion";
+            if (name.equals("no") || name.equals("rechazado") || name.equals("rechazar")) return "rechazo";
+            return null;
+        }
+    }
+
+    private final class NodoIteracionHandler extends NodoDecisionBaseHandler {
+        @Override
+        boolean supports(WorkflowNodo nodo) {
+            return hasNodeType(nodo, "iteracion");
+        }
+
+        @Override
+        String resolveTransitionHistoryAction(WorkflowTransition transition) {
+            String name = transition.getName() == null ? "" : transition.getName().trim().toLowerCase();
+            if (name.equals("repetir")) return "LOOP_RECHAZADO";
+            if (name.equals("salir")) return "LOOP_APROBADO";
+            return "LOOP_EVALUADO";
+        }
+
+        @Override
+        String resolveBranchOutcome(WorkflowTransition branch) {
+            String name = branch.getName() == null ? "" : branch.getName().trim().toLowerCase();
+            if (name.equals("repetir")) return "rechazo";
+            if (name.equals("salir")) return "aceptacion";
+            return null;
+        }
+    }
+
+    private final class NodoBifurcasionHandler extends NodoTipoHandler {
+        @Override
+        boolean supports(WorkflowNodo nodo) {
+            return hasNodeType(nodo, "bifurcasion");
+        }
+
+        @Override
+        boolean isPassThrough() {
+            return true;
+        }
+
+        @Override
+        boolean consumeAdvance(AdvanceCursor cursor, String[] transitionPath, List<WorkflowTransition> workflowTransitions) {
+            cursor.bifurcasionPassthroughId = cursor.toNodo.getId();
+            WorkflowTransition firstBranch = workflowTransitions.stream()
+                    .filter(t -> cursor.toNodo.getId().equals(t.getFromNodoId()))
+                    .findFirst()
+                    .orElse(null);
+            if (firstBranch == null) {
+                throw new ResponseStatusException(HttpStatus.BAD_REQUEST, "La bifurcacion no tiene ramas configuradas");
+            }
+            cursor.finalTransition = firstBranch;
+            cursor.toNodo = nodoRepo.findById(firstBranch.getToNodoId()).orElse(null);
+            return true;
+        }
+    }
+
+    private final class NodoUnionHandler extends NodoTipoHandler {
+        @Override
+        boolean supports(WorkflowNodo nodo) {
+            return hasNodeType(nodo, "union");
+        }
+
+        @Override
+        boolean isPassThrough() {
+            return true;
+        }
+    }
+
+}

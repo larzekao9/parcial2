@@ -1,0 +1,10 @@
+__pycache__
+*.pyc
+*.pyo
+.git
+.env
+.env.*
+*.log
+tf_log.txt
+tf_err.txt
+static/models

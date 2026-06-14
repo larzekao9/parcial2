@@ -1,0 +1,647 @@
+﻿import { Component, computed, inject, OnInit, signal } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { Router, RouterLink } from '@angular/router';
+import { FormsModule } from '@angular/forms';
+import { HttpClient } from '@angular/common/http';
+import { MatCardModule } from '@angular/material/card';
+import { MatButtonModule } from '@angular/material/button';
+import { MatCheckboxModule } from '@angular/material/checkbox';
+import { MatIconModule } from '@angular/material/icon';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
+import { MatSelectModule } from '@angular/material/select';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { finalize } from 'rxjs';
+import { ApiService } from '../../core/services/api.service';
+import { AuthService } from '../../core/services/auth.service';
+import { TfOfflineService } from '../../core/services/tf-offline.service';
+import { isStoredFileArray, isStoredFileValue, openStoredFileDownload, storedFileLabel } from '../../core/utils/file-value.utils';
+import { environment } from '../../../environments/environment';
+
+interface Tramite { id: string; code: string; title: string; description?: string; status: string; workflowId: string; createdAt: string }
+interface Workflow { id: string; name: string }
+interface WorkflowTransition { id: string; fromNodoId: string; toNodoId: string; name?: string }
+interface GridColumn { id: string; name: string; type: string; order?: number }
+interface FormField { id: string; name: string; type: string; columns?: GridColumn[]; options?: string[]; required?: boolean; isRequired?: boolean; order?: number }
+interface FormDefinition { id: string; title: string; fields: FormField[] }
+interface FileValue { fileName: string; storedName: string; downloadPath?: string }
+interface WorkflowNodo { id: string; name: string; order: number; nodeType: string; responsibleDepartmentId?: string; responsibleJobRoleId?: string; formDefinition?: FormDefinition }
+interface WorkflowDetail extends Workflow { nodo: WorkflowNodo[]; transitions: WorkflowTransition[] }
+interface VoiceFillResponse { transcript: string; formData: Record<string, unknown>; appliedFields: Array<{ field: string; value: unknown }>; warnings: string[]; }
+
+declare global {
+  interface Window {
+    SpeechRecognition?: new () => any;
+    webkitSpeechRecognition?: new () => any;
+  }
+}
+
+@Component({
+  selector: 'app-tramite-list',
+  standalone: true,
+  imports: [CommonModule, RouterLink, FormsModule, MatCardModule, MatButtonModule, MatCheckboxModule, MatIconModule, MatFormFieldModule, MatInputModule, MatSelectModule, MatProgressSpinnerModule, MatSnackBarModule],
+  template: `
+    <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-6 py-6">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-3xl font-bold text-white">Tramites</h2>
+        <button mat-flat-button color="primary" (click)="openCreate()"><mat-icon>add</mat-icon> Nuevo Tramite</button>
+      </div>
+
+      <div class="max-w-[320px]">
+        <mat-form-field appearance="outline" class="w-full">
+          <mat-label>Buscar por codigo</mat-label>
+          <input matInput [ngModel]="codeFilter()" (ngModelChange)="codeFilter.set($event)" placeholder="Ej: TRM00068">
+          @if (codeFilter().trim()) { <button mat-icon-button matSuffix (click)="codeFilter.set('')"><mat-icon>close</mat-icon></button> }
+        </mat-form-field>
+      </div>
+
+      @if (loading()) { <div class="flex justify-center py-16"><mat-spinner /></div> }
+      @else {
+        <div class="overflow-hidden rounded-3xl bg-blue-950 shadow-sm">
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-[#081726] text-left text-xs font-semibold uppercase tracking-wide text-blue-300/70">
+                <tr><th class="px-4 py-3">Codigo</th><th class="px-4 py-3">Titulo</th><th class="px-4 py-3">Estado</th><th class="px-4 py-3">Workflow</th><th class="px-4 py-3">Fecha</th><th class="px-4 py-3"></th></tr>
+              </thead>
+              <tbody>
+                @for (p of filteredTramites(); track p.id) {
+                  <tr class="border-t border-blue-900/30 hover:bg-[#081726]">
+                    <td class="px-4 py-3"><code class="rounded bg-[#0d1b2e] px-2 py-1 text-xs">{{ p.code }}</code></td>
+                    <td class="px-4 py-3">{{ p.title }}</td>
+                    <td class="px-4 py-3"><span class="rounded-full px-3 py-1 text-xs font-semibold" [ngClass]="statusClass(p.status)">{{ p.status }}</span></td>
+                    <td class="px-4 py-3">{{ wfName(p.workflowId) }}</td>
+                    <td class="px-4 py-3">{{ p.createdAt | date:'dd/MM/yyyy' }}</td>
+                    <td class="px-4 py-3"><button mat-icon-button [routerLink]="[p.id]"><mat-icon>visibility</mat-icon></button></td>
+                  </tr>
+                }
+                @empty { <tr><td colspan="6" class="px-4 py-10 text-center text-blue-300/50">No hay tramites</td></tr> }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      }
+
+      @if (showForm()) {
+        <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 px-4" (click)="closeCreate()">
+          <mat-card class="max-h-[85vh] w-full max-w-[540px] overflow-auto rounded-3xl p-6 shadow-2xl" (click)="$event.stopPropagation()">
+            <h3 class="mb-4 text-xl font-semibold text-white">Nuevo Tramite</h3>
+            <mat-form-field appearance="outline" class="w-full">
+              <mat-label>Workflow</mat-label>
+              <mat-select [(ngModel)]="formWorkflowId" (ngModelChange)="onWorkflowChange($event)">
+                @for (wf of workflows(); track wf.id) { <mat-option [value]="wf.id">{{ wf.name }}</mat-option> }
+              </mat-select>
+            </mat-form-field>
+
+            @if (loadingWorkflowDetail()) { <div class="flex justify-center pb-5 pt-2"><mat-spinner diameter="24" /></div> }
+            @else if (entryNodo()) {
+              <div class="mb-4 text-sm text-blue-200"><strong>Etapa:</strong> {{ entryNodo()!.name }}</div>
+              @if (entryFormFields().length) {
+                <div class="mb-3 flex flex-col gap-2">
+                  <h4 class="text-sm font-semibold text-white">{{ entryNodo()!.formDefinition?.title || 'Formulario' }}</h4>
+                  <div class="flex flex-wrap gap-2">
+                    <button mat-stroked-button type="button" [disabled]="voiceLoading()" (click)="toggleVoiceCapture()">
+                      <mat-icon>{{ voiceListening() ? 'mic_off' : 'mic' }}</mat-icon>
+                      {{ voiceListening() ? 'Detener voz' : 'Llenar por voz' }}
+                    </button>
+                    <button mat-flat-button color="accent" type="button" [disabled]="tfVoiceLoading()" (click)="toggleTfVoiceCapture()" style="background:#6366f1;color:#fff">
+                      <mat-icon>{{ tfVoiceListening() ? 'mic_off' : 'psychology' }}</mat-icon>
+                      {{ tfVoiceListening() ? 'Detener TF...' : tfVoiceLoading() ? 'Analizando...' : 'Llenar con TF' }}
+                    </button>
+                  </div>
+                  @if (tfVoiceTranscript()) {
+                    <div class="rounded-xl border border-indigo-200 bg-indigo-50 px-3 py-2 text-xs text-indigo-700">
+                      <strong>TF escuchando:</strong> {{ tfVoiceTranscript() }}
+                    </div>
+                  }
+                </div>
+                @for (field of entryFormFields(); track field.id) {
+                  @if (field.type === 'FILE') {
+                    <div class="mb-4 flex flex-col gap-2">
+                      <label class="text-sm font-medium text-blue-100">{{ field.name }}</label>
+                      <input class="text-sm text-blue-100" type="file" multiple (change)="onFilesSelected(field, $event)">
+                      @if (fileItemsForField(field).length) {
+                        <div class="flex flex-col gap-1">
+                          @for (file of fileItemsForField(field); track file.storedName) {
+                            <button type="button" class="bg-transparent p-0 text-left text-xs text-blue-400 underline" (click)="downloadFile(file)">{{ fileLabel(file) }}</button>
+                          }
+                        </div>
+                      }
+                    </div>
+                  } @else if (field.type === 'GRID') {
+                    <div class="mb-4">
+                      <div class="mb-2 flex items-center justify-between gap-3">
+                        <label class="text-sm font-medium text-blue-100">{{ field.name }}</label>
+                        <button mat-stroked-button type="button" (click)="addGridRow(field)">Agregar fila</button>
+                      </div>
+                      @if (gridColumns(field).length) {
+                        <div class="overflow-x-auto rounded-xl border border-blue-900/40">
+                          <table class="min-w-full text-sm">
+                            <thead class="bg-[#081726] text-left text-xs font-semibold uppercase tracking-wide text-blue-300/70">
+                              <tr>
+                                @for (column of gridColumns(field); track column.id) {
+                                  <th class="px-3 py-2">{{ column.name }}</th>
+                                }
+                                <th class="w-[90px] px-3 py-2"></th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              @for (row of gridRows(field); track rowIndex; let rowIndex = $index) {
+                                <tr class="border-t border-blue-900/30">
+                                @for (column of gridColumns(field); track column.id) {
+                                  <td class="px-3 py-2">
+                                      @if (column.type === 'CHECKBOX') {
+                                        <mat-checkbox [ngModel]="toBoolean(row[column.name])" (ngModelChange)="setGridCellValue(field, rowIndex, column, $event)"></mat-checkbox>
+                                      } @else {
+                                        <input
+                                          class="w-full rounded-lg border border-blue-900/40 px-3 py-2 text-sm outline-none focus:border-indigo-400"
+                                          [type]="inputType(column.type)"
+                                          [ngModel]="row[column.name] ?? ''"
+                                          (ngModelChange)="setGridCellValue(field, rowIndex, column, $event)">
+                                      }
+                                    </td>
+                                  }
+                                  <td class="px-3 py-2 text-right">
+                                    <button mat-button color="warn" type="button" (click)="removeGridRow(field, rowIndex)">Quitar</button>
+                                  </td>
+                                </tr>
+                              } @empty {
+                                <tr>
+                                  <td class="px-3 py-4 text-center text-sm text-blue-300/50" [attr.colspan]="gridColumns(field).length + 1">Sin filas</td>
+                                </tr>
+                              }
+                            </tbody>
+                          </table>
+                        </div>
+                      } @else {
+                        <div class="rounded-xl border border-dashed border-blue-800/40 bg-[#081726] px-4 py-3 text-sm text-blue-300/70">
+                          Esta grilla no tiene columnas configuradas.
+                        </div>
+                      }
+                    </div>
+                  } @else if (field.type === 'CHECKBOX') {
+                    <div class="mb-4 rounded-xl border border-blue-900/40 px-3 py-2">
+                      <mat-checkbox [ngModel]="toBoolean(fieldValue(field))" (ngModelChange)="setFieldValue(field, $event)">
+                        {{ field.name }}
+                      </mat-checkbox>
+                    </div>
+                  } @else {
+                    <mat-form-field appearance="outline" class="w-full">
+                      <mat-label>{{ field.name }}</mat-label>
+                      @switch (field.type) {
+                        @case ('DATE') { <input matInput type="date" [ngModel]="fieldValue(field)" (ngModelChange)="setFieldValue(field,$event)" [required]="isRequired(field)"> }
+                        @case ('NUMBER') { <input matInput type="number" [ngModel]="fieldValue(field)" (ngModelChange)="setFieldValue(field,$event)" [required]="isRequired(field)"> }
+                        @case ('EMAIL') { <input matInput type="email" [ngModel]="fieldValue(field)" (ngModelChange)="setFieldValue(field,$event)" [required]="isRequired(field)"> }
+                        @default { <input matInput [ngModel]="fieldValue(field)" (ngModelChange)="setFieldValue(field,$event)" [required]="isRequired(field)"> }
+                      }
+                    </mat-form-field>
+                  }
+                }
+              } @else {
+                <p class="mb-3 text-sm text-blue-300/70">Sin formulario inicial para tu etapa.</p>
+              }
+            }
+
+            <div class="mt-2 flex justify-end gap-2">
+              <button mat-button (click)="closeCreate()">Cancelar</button>
+              <button mat-flat-button color="primary" (click)="save()" [disabled]="loadingWorkflowDetail() || submitting()">{{ submitting() ? 'Enviando...' : 'Enviar' }}</button>
+            </div>
+          </mat-card>
+        </div>
+      }
+    </div>
+  `
+})
+export class TramiteListComponent implements OnInit {
+  private api       = inject(ApiService);
+  private http      = inject(HttpClient);
+  private snack     = inject(MatSnackBar);
+  private auth      = inject(AuthService);
+  private router    = inject(Router);
+  private tfOffline = inject(TfOfflineService);
+
+  tramites = signal<Tramite[]>([]);
+  workflows = signal<Workflow[]>([]);
+  loading = signal(true);
+  showForm = signal(false);
+  loadingWorkflowDetail = signal(false);
+  submitting = signal(false);
+  selectedWorkflow = signal<WorkflowDetail | null>(null);
+  entryNodo = signal<WorkflowNodo | null>(null);
+  autoStartTransition = signal<WorkflowTransition | null>(null);
+  submitTransition = signal<WorkflowTransition | null>(null);
+  formValues = signal<Record<string, unknown>>({});
+  voiceListening = signal(false);
+  voiceLoading = signal(false);
+  voiceTranscript = signal('');
+  tfVoiceListening = signal(false);
+  tfVoiceLoading = signal(false);
+  tfVoiceTranscript = signal('');
+  formWorkflowId = '';
+  tramiteFolder  = '';        // UUID generado antes del primer upload — carpeta S3 del trámite
+  codeFilter = signal('');
+  private speechRecognition: any = null;
+  private tfSpeechRecognition: any = null;
+  private shouldApplyVoice = false;
+  private silenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private tfSilenceTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly NLP_URL = `${environment.apiUrl}/workflow-ai`;
+
+  entryFormFields = computed(() => [...(this.entryNodo()?.formDefinition?.fields ?? [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0)));
+  filteredTramites = computed(() => {
+    const f = this.codeFilter().trim().toLowerCase();
+    return f ? this.tramites().filter(p => p.code.toLowerCase().includes(f)) : this.tramites();
+  });
+
+  ngOnInit() {
+    const navWorkflowId: string | undefined = this.router.lastSuccessfulNavigation?.extras?.state?.['workflowId'];
+    this.api.get<Tramite[]>('/tramites').subscribe({ next: p => { this.tramites.set(p); this.loading.set(false); }, error: () => this.loading.set(false) });
+    this.api.get<Workflow[]>('/workflows').subscribe({ next: w => {
+      this.workflows.set(w);
+      if (navWorkflowId && w.find(wf => wf.id === navWorkflowId)) {
+        this.openCreate();
+        this.formWorkflowId = navWorkflowId;
+        this.onWorkflowChange(navWorkflowId);
+      }
+    }});
+  }
+
+  statusClass(s: string) {
+    return ({ PENDIENTE: 'bg-amber-100 text-amber-800', EN_PROGRESO: 'bg-blue-900/30 text-blue-300', COMPLETADO: 'bg-emerald-100 text-emerald-800', RECHAZADO: 'bg-rose-100 text-rose-800' } as Record<string, string>)[s] ?? 'bg-[#0d1b2e] text-blue-100';
+  }
+
+  wfName(id: string) { return this.workflows().find(w => w.id === id)?.name || id; }
+
+  openCreate() {
+    this.stopVoiceCapture(false);
+    this.voiceTranscript.set('');
+    this.formWorkflowId = '';
+    this.tramiteFolder  = this._uuid();
+    this.formValues.set({});
+    this.selectedWorkflow.set(null); this.entryNodo.set(null);
+    this.autoStartTransition.set(null); this.submitTransition.set(null);
+    this.showForm.set(true);
+  }
+
+  closeCreate() {
+    this.stopVoiceCapture(false);
+    this.tramiteFolder = '';
+    this.showForm.set(false);
+  }
+
+  onWorkflowChange(workflowId: string) {
+    this.stopVoiceCapture(false);
+    this.voiceTranscript.set('');
+    this.tramiteFolder = this._uuid();
+    this.formValues.set({});
+    this.selectedWorkflow.set(null); this.entryNodo.set(null);
+    this.autoStartTransition.set(null); this.submitTransition.set(null);
+    if (!workflowId) return;
+    this.loadingWorkflowDetail.set(true);
+    this.api.get<WorkflowDetail>(`/workflows/${workflowId}`).pipe(finalize(() => this.loadingWorkflowDetail.set(false))).subscribe({
+      next: wf => {
+        this.selectedWorkflow.set(wf);
+        const nodo = [...wf.nodo].sort((a, b) => a.order - b.order);
+        const nodoInicio = nodo.find(nodo => nodo.nodeType.toLowerCase() === 'inicio') ?? null;
+        const primerNodoTrabajo = nodo.find(nodo => nodo.nodeType.toLowerCase() !== 'inicio') ?? null;
+        const transicionInicio = nodoInicio ? (wf.transitions.find(t => t.fromNodoId === nodoInicio.id) ?? null) : null;
+        const entry = transicionInicio
+          ? nodo.find(nodo => nodo.id === transicionInicio.toNodoId) ?? primerNodoTrabajo ?? nodoInicio
+          : primerNodoTrabajo ?? nodoInicio;
+        if (!entry) return;
+        this.autoStartTransition.set(transicionInicio);
+        this.submitTransition.set(this.resolveSubmitTransition(wf, entry));
+        if (entry.formDefinition?.fields?.length) { this.entryNodo.set(entry); return; }
+        this.api.get<FormDefinition>(`/forms/nodo/${entry.id}`).subscribe({ next: f => this.entryNodo.set({ ...entry, formDefinition: f }), error: () => this.entryNodo.set(entry) });
+      },
+      error: (err) => this.snack.open(err.error?.message || 'Error al cargar el workflow', '', { duration: 3000 })
+    });
+  }
+
+  private resolveSubmitTransition(workflow: WorkflowDetail, entry: WorkflowNodo) {
+    const transition = workflow.transitions.find(t => t.fromNodoId === entry.id) ?? null;
+    if (!transition) return null;
+    const targetNodo = workflow.nodo.find(nodo => nodo.id === transition.toNodoId);
+    const targetType = String(targetNodo?.nodeType || '').toLowerCase();
+    if (targetType === 'decision' || targetType === 'iteracion') {
+      return null;
+    }
+    return transition;
+  }
+
+  isRequired(f: FormField) { return !!(f.required || f.isRequired); }
+  fieldValue(f: FormField) { return this.formValues()[f.name] ?? ''; }
+  setFieldValue(f: FormField, v: unknown) { this.formValues.update(vals => ({ ...vals, [f.name]: v })); }
+  inputType(type: string) { return type === 'DATE' ? 'date' : type === 'NUMBER' ? 'number' : type === 'EMAIL' ? 'email' : 'text'; }
+  toBoolean(value: unknown) { return value === true; }
+
+  gridColumns(field: FormField) {
+    return [...(field.columns ?? [])].sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  }
+
+  gridRows(field: FormField) {
+    const value = this.formValues()[field.name];
+    return Array.isArray(value) ? value.filter((row): row is Record<string, unknown> => !!row && typeof row === 'object' && !Array.isArray(row)) : [];
+  }
+
+  addGridRow(field: FormField) {
+    const columns = this.gridColumns(field);
+    if (!columns.length) {
+      this.snack.open('La grilla no tiene columnas configuradas', '', { duration: 2500 });
+      return;
+    }
+    const nextRow = Object.fromEntries(columns.map(column => [column.name, '']));
+    this.setFieldValue(field, [...this.gridRows(field), nextRow]);
+  }
+
+  removeGridRow(field: FormField, rowIndex: number) {
+    this.setFieldValue(field, this.gridRows(field).filter((_, index) => index !== rowIndex));
+  }
+
+  setGridCellValue(field: FormField, rowIndex: number, column: GridColumn, value: unknown) {
+    const rows = this.gridRows(field).map(row => ({ ...row }));
+    if (!rows[rowIndex]) {
+      rows[rowIndex] = {};
+    }
+    rows[rowIndex] = { ...rows[rowIndex], [column.name]: value };
+    this.setFieldValue(field, rows);
+  }
+
+  isFileValue(v: unknown): v is FileValue { return isStoredFileValue(v); }
+  isFileList(v: unknown): v is FileValue[] { return isStoredFileArray(v); }
+  fileLabel(v: unknown) { return storedFileLabel(v); }
+  downloadFile(v: unknown) {
+    openStoredFileDownload(v);
+  }
+
+  fileItemsForField(field: FormField): FileValue[] {
+    const value = this.formValues()[field.name];
+    if (this.isFileValue(value)) return [value];
+    if (this.isFileList(value)) return value;
+    return [];
+  }
+
+  onFilesSelected(field: FormField, event: Event) {
+    const files = Array.from((event.target as HTMLInputElement)?.files ?? []);
+    if (!files.length) return;
+    const uploaded: FileValue[] = [];
+    const existing = this.fileItemsForField(field);
+    const uploadNext = (index: number) => {
+      if (index >= files.length) {
+        this.setFieldValue(field, [...existing, ...uploaded]);
+        this.snack.open(`${uploaded.length} archivo(s) subidos`, '', { duration: 3000 });
+        return;
+      }
+      const file = files[index];
+      const body = new FormData();
+      body.append('file', file);
+      const wfName = this.selectedWorkflow()?.name;
+      if (wfName && this.tramiteFolder) {
+        body.append('workflowName', wfName);
+        body.append('tramiteFolder', this.tramiteFolder);
+      } else if (this.formWorkflowId) {
+        body.append('workflowId', this.formWorkflowId);
+      }
+      this.api.post<FileValue>('/files/upload', body).subscribe({
+        next: u => {
+          uploaded.push(u);
+          uploadNext(index + 1);
+        },
+        error: () => this.snack.open(`Error al subir "${file.name}"`, '', { duration: 3000 })
+      });
+    };
+    uploadNext(0);
+  }
+
+  toggleVoiceCapture() {
+    if (this.voiceListening()) {
+      this.stopVoiceCapture(true);
+      return;
+    }
+    const SpeechRecognitionCtor = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognitionCtor) {
+      this.snack.open('Tu navegador no soporta reconocimiento de voz', '', { duration: 3500 });
+      return;
+    }
+    if (!this.formWorkflowId || !this.entryFormFields().length) {
+      this.snack.open('El workflow actual no tiene formulario para completar por voz', '', { duration: 3000 });
+      return;
+    }
+    this.speechRecognition = new SpeechRecognitionCtor();
+    this.speechRecognition.lang = 'es-ES';
+    this.speechRecognition.continuous = true;
+    this.speechRecognition.interimResults = true;
+    this.shouldApplyVoice = false;
+    this.speechRecognition.onstart = () => {
+      this.voiceListening.set(true);
+      this.voiceTranscript.set('');
+      this.clearSilenceTimer();
+    };
+    this.speechRecognition.onerror = () => {
+      this.voiceListening.set(false);
+      this.clearSilenceTimer();
+      this.shouldApplyVoice = false;
+      this.snack.open('No se pudo capturar la voz', '', { duration: 3000 });
+    };
+    this.speechRecognition.onend = () => {
+      this.clearSilenceTimer();
+      this.voiceListening.set(false);
+      const shouldApply = this.shouldApplyVoice;
+      this.shouldApplyVoice = false;
+      this.speechRecognition = null;
+      const transcript = this.voiceTranscript().trim();
+      if (shouldApply && transcript) {
+        this.applyVoiceTranscript(transcript);
+      }
+    };
+    this.speechRecognition.onresult = (event: any) => {
+      const transcript = Array.from(event.results ?? [])
+        .map((result: any) => result?.[0]?.transcript || '')
+        .join(' ')
+        .trim();
+      if (!transcript) return;
+      this.voiceTranscript.set(transcript);
+      this.restartSilenceTimer();
+    };
+    this.speechRecognition.start();
+  }
+
+  toggleTfVoiceCapture() {
+    if (this.tfVoiceListening()) {
+      this.tfSpeechRecognition?.stop();
+      return;
+    }
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { this.snack.open('Tu navegador no soporta reconocimiento de voz', '', { duration: 3000 }); return; }
+    if (!this.entryFormFields().length) { this.snack.open('Este workflow no tiene formulario', '', { duration: 2500 }); return; }
+
+    this.tfSpeechRecognition = new SR();
+    this.tfSpeechRecognition.lang = 'es-ES';
+    this.tfSpeechRecognition.continuous = true;
+    this.tfSpeechRecognition.interimResults = true;
+
+    this.tfSpeechRecognition.onstart = () => {
+      this.tfVoiceListening.set(true);
+      this.tfVoiceTranscript.set('');
+    };
+    this.tfSpeechRecognition.onerror = () => {
+      this.tfVoiceListening.set(false);
+      this.snack.open('Error capturando voz', '', { duration: 2500 });
+    };
+    this.tfSpeechRecognition.onresult = (event: any) => {
+      const t = Array.from(event.results ?? [])
+        .map((r: any) => r?.[0]?.transcript || '').join(' ').trim();
+      this.tfVoiceTranscript.set(t);
+      if (this.tfSilenceTimer) clearTimeout(this.tfSilenceTimer);
+      this.tfSilenceTimer = setTimeout(() => {
+        this.tfSpeechRecognition?.stop();
+      }, 5000);
+    };
+    this.tfSpeechRecognition.onend = () => {
+      this.tfVoiceListening.set(false);
+      const transcript = this.tfVoiceTranscript().trim();
+      if (transcript) this.applyTfVoice(transcript);
+    };
+    this.tfSpeechRecognition.start();
+  }
+
+  private applyTfVoice(transcript: string) {
+    this.tfVoiceLoading.set(true);
+    const fields = this.entryFormFields().map(f => ({
+      name: f.name,
+      type: f.type,
+      required: f.required ?? f.isRequired ?? false,
+      columns: f.columns ?? []
+    }));
+    this.http.post<any>(`${this.NLP_URL}/nlp/fill-form`, { transcript, fields })
+      .subscribe({
+        next: (res) => {
+          this.tfVoiceLoading.set(false);
+          if (res.formData && Object.keys(res.formData).length) {
+            const merged: Record<string, unknown> = { ...this.formValues() };
+            for (const [key, val] of Object.entries(res.formData)) {
+              if (Array.isArray(val)) {
+                // GRID: agregar filas a las existentes
+                const existing = Array.isArray(merged[key]) ? (merged[key] as unknown[]) : [];
+                merged[key] = [...existing, ...val];
+              } else {
+                merged[key] = val;
+              }
+            }
+            this.formValues.set(merged);
+            this.snack.open(`TF completó ${res.appliedFields?.length ?? 0} campo(s)`, '', { duration: 3000 });
+          } else {
+            const msg = res.warnings?.length
+              ? res.warnings.join(' | ')
+              : 'TF no detectó valores. Di: "en el campo [nombre] ponele [valor]"';
+            this.snack.open(msg, 'OK', { duration: 6000 });
+          }
+          this.tfVoiceTranscript.set('');
+        },
+        error: async () => {
+          try {
+            const res = await this.tfOffline.fillFormOffline(transcript, fields);
+            if (res.formData && Object.keys(res.formData).length) {
+              const merged: Record<string, unknown> = { ...this.formValues() };
+              for (const [key, val] of Object.entries(res.formData)) {
+                if (Array.isArray(val)) {
+                  const existing = Array.isArray(merged[key]) ? (merged[key] as unknown[]) : [];
+                  merged[key] = [...existing, ...val];
+                } else {
+                  merged[key] = val;
+                }
+              }
+              this.formValues.set(merged);
+              this.snack.open(`TF (offline) completó ${res.appliedFields?.length ?? 0} campo(s)`, '', { duration: 3000 });
+            } else {
+              this.snack.open('TF offline no detectó valores', 'OK', { duration: 5000 });
+            }
+            this.tfVoiceTranscript.set('');
+          } catch {
+            this.snack.open('Error conectando con el servidor', '', { duration: 3500 });
+          } finally {
+            this.tfVoiceLoading.set(false);
+          }
+        }
+      });
+  }
+
+  save() {
+    if (!this.formWorkflowId) { this.snack.open('Selecciona un workflow', '', { duration: 2500 }); return; }
+    if (!this.entryNodo()) { this.snack.open('Espera a que cargue la etapa inicial', '', { duration: 3000 }); return; }
+    const wf = this.selectedWorkflow(); const entry = this.entryNodo();
+    const payload = {
+      title: wf && entry ? `${wf.name} - ${entry.name}` : `Tramite ${new Date().toLocaleString()}`,
+      description: '', workflowId: this.formWorkflowId, formData: this.formValues(),
+      tramiteFolder: this.tramiteFolder || undefined,
+      comment: `Enviado por ${this.auth.user()?.name || 'usuario'}`,
+      autoTransitionIds: [this.autoStartTransition()?.id, this.submitTransition()?.id].filter((id): id is string => !!id)
+    };
+    this.submitting.set(true);
+    this.api.post<any>('/tramites/submit', payload).pipe(finalize(() => this.submitting.set(false))).subscribe({
+      next: (p: any) => { this.tramites.update(list => [p, ...list.filter(i => i.id !== p.id)]); this.closeCreate(); this.snack.open('Tramite enviado', '', { duration: 2500 }); },
+      error: (err) => this.snack.open(err.error?.message || 'Error al enviar', '', { duration: 3500 })
+    });
+  }
+
+  private stopVoiceCapture(executeApply: boolean) {
+    this.shouldApplyVoice = executeApply;
+    this.clearSilenceTimer();
+    if (this.speechRecognition) {
+      this.speechRecognition.stop();
+      return;
+    }
+    if (executeApply && this.voiceTranscript().trim()) {
+      this.applyVoiceTranscript(this.voiceTranscript().trim());
+    }
+    this.voiceListening.set(false);
+  }
+
+  private applyVoiceTranscript(transcript: string) {
+    this.voiceLoading.set(true);
+    this.api.post<VoiceFillResponse>('/tramites/voice-fill', {
+      workflowId: this.formWorkflowId,
+      transcript,
+      formData: this.formValues()
+    }).pipe(finalize(() => this.voiceLoading.set(false))).subscribe({
+      next: (response) => {
+        this.formValues.set({ ...response.formData });
+        const applied = response.appliedFields?.length ?? 0;
+        if (applied > 0) {
+          this.snack.open(`Se completaron ${applied} campo(s) por voz`, '', { duration: 2500 });
+        } else {
+          this.snack.open(response.warnings?.[0] || 'No se detectaron valores aplicables', '', { duration: 3000 });
+        }
+      },
+      error: (err) => this.snack.open(err.error?.message || 'No se pudo interpretar la voz', '', { duration: 3000 })
+    });
+  }
+
+  private restartSilenceTimer() {
+    this.clearSilenceTimer();
+    this.silenceTimer = setTimeout(() => {
+      if (this.voiceListening()) {
+        this.stopVoiceCapture(true);
+      }
+    }, 4000);
+  }
+
+  private clearSilenceTimer() {
+    if (this.silenceTimer) {
+      clearTimeout(this.silenceTimer);
+      this.silenceTimer = null;
+    }
+  }
+
+  private _uuid(): string {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+      const r = Math.random() * 16 | 0;
+      return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+    });
+  }
+}
+
+

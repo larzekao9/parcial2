@@ -1,0 +1,336 @@
+﻿import { Component, OnDestroy, signal } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { HttpClient } from '@angular/common/http';
+import { FormsModule } from '@angular/forms';
+import { MatIconModule } from '@angular/material/icon';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { environment } from '../../../environments/environment';
+
+const COLUMN_LABELS: Record<string, string> = {
+  tramiteId:      'ID',
+  code:           'Código',
+  title:          'Título',
+  workflowName:   'Workflow',
+  departmentName: 'Departamento',
+  status:         'Estado',
+  userName:       'Usuario',
+  createdAt:      'Fecha',
+  total:          'Total Trámites',
+  avgMinutes:     'Tiempo Prom. (min)',
+  count:          'Cantidad',
+};
+
+interface ReportResult {
+  spec: {
+    title: string;
+    filters: Record<string, string>;
+    groupBy: string | null;
+    orderBy: string;
+    format: string;
+    columns: string[];
+    intent?: string;
+  };
+  data: Record<string, any>[];
+  total: number;
+}
+
+@Component({
+  selector: 'app-report-nlp',
+  standalone: true,
+  imports: [CommonModule, FormsModule, MatIconModule, MatProgressSpinnerModule],
+  styles: [`
+    .mic-pulse { animation: pulse 1.2s infinite; }
+    @keyframes pulse {
+      0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,.4); }
+      50%      { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
+    }
+  `],
+  template: `
+    <div class="mx-auto max-w-[1200px] space-y-5 p-6">
+
+      <!-- Header -->
+      <div>
+        <h2 class="m-0 text-2xl font-bold text-blue-50">Reportes</h2>
+      </div>
+
+      <!-- Input card -->
+      <div class="rounded-2xl border border-blue-900/40 bg-blue-950 p-5 shadow-sm">
+        <div class="mb-4 flex gap-3">
+
+          <!-- Mic -->
+          <button
+            class="flex h-12 w-12 shrink-0 items-center justify-center rounded-full shadow transition"
+            [class.mic-pulse]="recording()"
+            [class.bg-rose-500]="recording()"
+            [class.bg-blue-600]="!recording()"
+            (click)="toggleRecording()"
+            [title]="recording() ? 'Detener' : 'Dictar'">
+            <mat-icon class="!text-[22px] text-white">{{ recording() ? 'stop' : 'mic' }}</mat-icon>
+          </button>
+
+          <!-- Textarea -->
+          <textarea
+            class="flex-1 resize-none rounded-xl border border-blue-900/40 bg-[#081726] p-3 text-sm text-blue-50 placeholder:text-blue-300/50 focus:border-indigo-400 focus:bg-blue-950 focus:outline-none"
+            rows="3"
+            placeholder='Ej: "quiero ver el trámite TRM00004" | "todos los trámites del 10 de junio del 2026" | "departamentos con mayor flujo ordenado ascendentemente" | "tiempo promedio que el departamento Legal resuelve el workflow Instalacion de Medidor"'
+            [(ngModel)]="prompt">
+          </textarea>
+        </div>
+
+        @if (recording()) {
+          <p class="mb-3 flex items-center gap-1.5 text-xs text-rose-500">
+            <span class="h-2 w-2 animate-pulse rounded-full bg-rose-500"></span>
+            Grabando… hablá y el reporte se generará automáticamente al terminar
+          </p>
+        }
+
+        <div class="flex flex-wrap items-center gap-3">
+          <button
+            class="flex items-center gap-2 rounded-xl bg-blue-600 px-5 py-2.5 text-sm font-semibold text-white transition hover:bg-indigo-700 disabled:opacity-50"
+            [disabled]="!prompt.trim() || loading()"
+            (click)="generate()">
+            @if (loading()) {
+              <mat-spinner [diameter]="16" />
+            } @else {
+              <mat-icon class="!text-[18px]">auto_awesome</mat-icon>
+            }
+            Generar reporte
+          </button>
+
+          @if (result()) {
+            <button
+              class="flex items-center gap-1 rounded-xl border border-blue-900/40 px-4 py-2.5 text-sm text-blue-300/70 transition hover:bg-[#081726]"
+              (click)="clear()">
+              <mat-icon class="!text-[18px]">refresh</mat-icon>
+              Nuevo
+            </button>
+          }
+        </div>
+
+        @if (error()) {
+          <div class="mt-4 flex items-center gap-2 rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+            <mat-icon class="!text-[18px]">error_outline</mat-icon>
+            {{ error() }}
+          </div>
+        }
+      </div>
+
+      <!-- Resultado -->
+      @if (result()) {
+        <!-- Spec summary chips -->
+        <div class="flex flex-wrap gap-2">
+          <span class="rounded-full border border-blue-900/40 bg-[#081726] px-3 py-1 text-xs font-medium text-blue-200">
+            {{ result()!.total }} resultado(s)
+          </span>
+          @for (entry of activeFilters(); track entry.key) {
+            <span class="rounded-full border border-indigo-200 bg-indigo-50 px-3 py-1 text-xs font-medium text-indigo-700">
+              {{ entry.key }}: {{ entry.value }}
+            </span>
+          }
+          @if (result()!.spec.groupBy) {
+            <span class="rounded-full border border-amber-200 bg-amber-50 px-3 py-1 text-xs font-medium text-amber-700">
+              Agrupado por {{ colLabel(result()!.spec.groupBy!) }}
+            </span>
+          }
+        </div>
+
+        <!-- Table -->
+        @if (result()!.data.length) {
+          <div class="overflow-hidden rounded-2xl border border-blue-900/40 bg-blue-950 shadow-sm">
+            <div class="flex items-center border-b border-blue-900/30 bg-[#081726] px-5 py-3">
+              <span class="font-semibold text-blue-100">{{ result()!.spec.title }}</span>
+            </div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead class="bg-[#081726] text-left text-xs font-semibold uppercase tracking-wide text-blue-300/70">
+                  <tr>
+                    @for (col of result()!.spec.columns; track col) {
+                      <th class="border-b border-blue-900/40 px-4 py-3">{{ colLabel(col) }}</th>
+                    }
+                  </tr>
+                </thead>
+                <tbody>
+                  @for (row of result()!.data; track $index) {
+                    @if (isGroupHeader(row)) {
+                      <tr class="bg-indigo-50">
+                        <td [attr.colspan]="result()!.spec.columns.length"
+                            class="px-4 py-2 text-xs font-bold text-indigo-700">
+                          {{ row['_groupLabel'] }}
+                        </td>
+                      </tr>
+                    } @else {
+                      <tr class="border-t border-blue-900/30 hover:bg-[#081726]">
+                        @for (col of result()!.spec.columns; track col) {
+                          <td class="px-4 py-2.5 text-blue-100">{{ formatCell(row, col) }}</td>
+                        }
+                      </tr>
+                    }
+                  }
+                </tbody>
+              </table>
+            </div>
+            <div class="border-t border-blue-900/30 px-5 py-2 text-right text-xs text-blue-300/50">
+              {{ result()!.total }} registro(s)
+            </div>
+          </div>
+        } @else {
+          <div class="rounded-2xl border border-dashed border-blue-900/40 bg-[#081726] p-8 text-center text-blue-300/50">
+            <mat-icon class="!h-10 !w-10 !text-4xl">search_off</mat-icon>
+            <p class="mt-2">No se encontraron datos para los criterios indicados.</p>
+          </div>
+        }
+      }
+
+    </div>
+  `
+})
+export class ReportNlpComponent implements OnDestroy {
+  private recognition: any = null;
+
+  prompt    = '';
+  recording = signal(false);
+  loading   = signal(false);
+  result    = signal<ReportResult | null>(null);
+  error     = signal('');
+
+  constructor(private http: HttpClient) {}
+
+  toggleRecording() {
+    this.recording() ? this.stopRecording() : this.startRecording();
+  }
+
+  private startRecording() {
+    const SR = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
+    if (!SR) { this.error.set('Tu navegador no soporta dictado. Usá Chrome o Edge.'); return; }
+    this.error.set('');
+    this.recognition = new SR();
+    this.recognition.lang = 'es-ES';
+    this.recognition.continuous = false;
+    this.recognition.interimResults = false;
+
+    this.recognition.onresult = (e: any) => {
+      const transcript = Array.from(e.results as any[])
+        .filter((r: any) => r.isFinal)
+        .map((r: any) => r[0].transcript)
+        .join(' ')
+        .trim();
+      if (transcript) {
+        this.prompt = '';
+        this._executePrompt(transcript);
+      }
+    };
+
+    this.recognition.onerror = () => this.recording.set(false);
+    this.recognition.onend   = () => this.recording.set(false);
+    this.recognition.start();
+    this.recording.set(true);
+  }
+
+  private stopRecording() {
+    this.recognition?.stop();
+    this.recording.set(false);
+  }
+
+  generate() {
+    if (!this.prompt.trim()) return;
+    this._executePrompt(this.prompt.trim());
+  }
+
+  private _executePrompt(text: string) {
+    this.loading.set(true);
+    this.error.set('');
+    this.result.set(null);
+
+    this.http.post(
+      `${environment.apiUrl}/workflow-ai/nlp/report-generate`,
+      { prompt: text },
+      { responseType: 'blob', observe: 'response' }
+    ).subscribe({
+      next: (response) => {
+        this.loading.set(false);
+        const contentType = response.headers.get('Content-Type') ?? '';
+        const blob = response.body!;
+
+        if (contentType.includes('application/json')) {
+          blob.text().then(raw => {
+            const res: ReportResult = JSON.parse(raw);
+            if (res.spec.groupBy && res.data.length) {
+              res.data = this.flattenGroups(res.data, res.spec.groupBy);
+            }
+            this.result.set(res);
+          });
+        } else {
+          const isWord = contentType.includes('wordprocessingml');
+          const ext    = isWord ? 'docx' : 'xlsx';
+          const url    = URL.createObjectURL(blob);
+          const a      = document.createElement('a');
+          a.href = url; a.download = `reporte.${ext}`; a.click();
+          URL.revokeObjectURL(url);
+        }
+      },
+      error: (err) => {
+        this.loading.set(false);
+        this.error.set(
+          err.status === 0
+            ? 'No se pudo conectar al servidor. ¿Está corriendo el backend?'
+            : `Error ${err.status}: ${err.error?.detail ?? 'Error desconocido'}`
+        );
+      },
+    });
+  }
+
+  clear() {
+    this.result.set(null);
+    this.prompt = '';
+    this.error.set('');
+  }
+
+  colLabel(col: string): string {
+    return COLUMN_LABELS[col] ?? col;
+  }
+
+  activeFilters() {
+    const labelMap: Record<string, string> = {
+      departmentName: 'Departamento', workflowName: 'Workflow',
+      userName: 'Usuario', status: 'Estado',
+      dateFrom: 'Desde', dateTo: 'Hasta', code: 'Código',
+    };
+    return Object.entries(this.result()?.spec.filters ?? {})
+      .filter(([, v]) => v)
+      .map(([k, v]) => ({ key: labelMap[k] ?? k, value: v }));
+  }
+
+  isGroupHeader(row: Record<string, any>): boolean {
+    return '_groupLabel' in row;
+  }
+
+  formatCell(row: Record<string, any>, col: string): string {
+    const val = row[col];
+    if (val === null || val === undefined || val === '') return '—';
+    if (col === 'createdAt') return String(val).substring(0, 10);
+    if (col === 'avgMinutes') {
+      const m = Number(val);
+      if (m >= 60) return `${(m / 60).toFixed(1)} h`;
+      return `${m} min`;
+    }
+    return String(val);
+  }
+
+  private flattenGroups(rows: Record<string, any>[], groupBy: string): Record<string, any>[] {
+    const groups: Record<string, Record<string, any>[]> = {};
+    for (const row of rows) {
+      const key = String(row[groupBy] ?? 'Sin valor');
+      (groups[key] = groups[key] ?? []).push(row);
+    }
+    const flat: Record<string, any>[] = [];
+    for (const [key, groupRows] of Object.entries(groups)) {
+      flat.push({ _groupLabel: `${this.colLabel(groupBy)}: ${key} (${groupRows.length})` });
+      flat.push(...groupRows);
+    }
+    return flat;
+  }
+
+  ngOnDestroy() { this.recognition?.stop(); }
+}
+
+

@@ -1,0 +1,268 @@
+@use '@angular/material' as mat;
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@include mat.core();
+
+$primary-palette: mat.define-palette(mat.$blue-palette);
+$accent-palette:  mat.define-palette(mat.$cyan-palette, A200, A100, A400);
+$warn-palette:    mat.define-palette(mat.$red-palette);
+
+$theme: mat.define-dark-theme((
+  color: (
+    primary: $primary-palette,
+    accent:  $accent-palette,
+    warn:    $warn-palette,
+  ),
+  typography: mat.define-typography-config($font-family: 'Inter, sans-serif'),
+  density: 0
+));
+
+@include mat.all-component-themes($theme);
+
+/* ═══════════════════════════════════════════════════════════════════════
+   DARK BLUE THEME — CSS MDC Tokens + hard overrides
+   ═══════════════════════════════════════════════════════════════════════ */
+
+:root {
+  /* ── Angular Material MDC custom property tokens ── */
+  --mdc-elevated-card-container-color:   #0f2140;
+  --mdc-outlined-card-container-color:   #0f2140;
+  --mat-card-subtitle-text-color:        #93c5fd;
+
+  --mat-table-background-color:          #0f2140;
+  --mat-table-header-container-height:   48px;
+  --mat-table-footer-container-height:   48px;
+  --mat-table-row-item-container-height: 48px;
+  --mat-table-row-item-label-text-color: #e2e8f0;
+  --mat-table-header-headline-color:     #93c5fd;
+
+  --mdc-filled-text-field-container-color:          #0f2140;
+  --mdc-filled-text-field-input-text-color:         #e2e8f0;
+  --mdc-outlined-text-field-input-text-color:       #e2e8f0;
+  --mdc-outlined-text-field-label-text-color:       #93c5fd;
+  --mdc-outlined-text-field-hover-label-text-color: #60a5fa;
+
+  --mat-select-panel-background-color:   #0f2140;
+  --mat-option-label-text-color:         #e2e8f0;
+  --mat-option-hover-state-layer-color:  rgba(59,130,246,0.12);
+
+  --mdc-dialog-container-color:          #0f2140;
+  --mat-dialog-container-text-color:     #e2e8f0;
+
+  --mat-menu-container-color:            #0f2140;
+  --mat-menu-item-label-text-color:      #e2e8f0;
+
+  --mdc-snackbar-container-color:        #1a3a5c;
+  --mdc-snackbar-supporting-text-color:  #e2e8f0;
+
+  --mat-sidenav-container-background-color: #081726;
+  --mat-sidenav-content-background-color:   #0d1b2e;
+  --mat-sidenav-container-text-color:       #e2e8f0;
+
+  --mat-paginator-container-background-color: #0f2140;
+  --mat-paginator-container-text-color:       #93c5fd;
+
+  --mdc-checkbox-selected-checkmark-color: #ffffff;
+  --mat-checkbox-label-text-color:         #e2e8f0;
+}
+
+/* ── Base ──────────────────────────────────────────────────── */
+html, body {
+  background-color: #0d1b2e;
+  color: #e2e8f0;
+  margin: 0;
+}
+
+/* ── Sidenav ───────────────────────────────────────────────── */
+.mat-drawer-container,
+.mat-sidenav-container {
+  background-color: #0d1b2e !important;
+  color: #e2e8f0 !important;
+}
+.mat-drawer-content,
+.mat-sidenav-content {
+  background-color: #0d1b2e !important;
+}
+.mat-sidenav { background-color: #081726 !important; }
+
+/* ── Cards ─────────────────────────────────────────────────── */
+.mat-mdc-card {
+  background-color: #0f2140 !important;
+  color: #e2e8f0 !important;
+  border: 1px solid rgba(59,130,246,0.15) !important;
+}
+.mat-mdc-card-content,
+.mat-mdc-card-header,
+.mat-mdc-card-title  { color: #e2e8f0 !important; }
+
+/* ── Tables ────────────────────────────────────────────────── */
+.mat-mdc-table { background-color: #0f2140 !important; }
+.mat-mdc-header-row { background-color: #07111e !important; }
+.mat-mdc-row  { color: #e2e8f0 !important; }
+.mat-mdc-row:hover { background-color: rgba(59,130,246,0.08) !important; }
+.mat-mdc-cell,
+.mat-mdc-header-cell { color: #e2e8f0 !important; border-bottom-color: rgba(59,130,246,0.12) !important; }
+
+/* ── Select / Autocomplete ─────────────────────────────────── */
+.mat-mdc-select-panel,
+.mdc-menu-surface,
+.mat-mdc-autocomplete-panel {
+  background-color: #0f2140 !important;
+  border: 1px solid rgba(59,130,246,0.2) !important;
+}
+.mat-mdc-option { color: #e2e8f0 !important; }
+.mat-mdc-option:hover { background-color: rgba(59,130,246,0.12) !important; }
+.mat-mdc-option.mdc-list-item--selected { background-color: rgba(59,130,246,0.2) !important; }
+
+/* ── Menu ──────────────────────────────────────────────────── */
+.mat-mdc-menu-panel { background-color: #0f2140 !important; border: 1px solid rgba(59,130,246,0.15) !important; }
+.mat-mdc-menu-item  { color: #e2e8f0 !important; }
+.mat-mdc-menu-item:hover { background-color: rgba(59,130,246,0.1) !important; }
+
+/* ── Dialog ────────────────────────────────────────────────── */
+.mdc-dialog__surface { background-color: #0f2140 !important; }
+.mat-mdc-dialog-container { color: #e2e8f0 !important; }
+
+/* ── Snackbar ──────────────────────────────────────────────── */
+.mat-mdc-snack-bar-container .mdc-snackbar__surface { background-color: #1a3a5c !important; color: #e2e8f0 !important; }
+
+/* ── Paginator ─────────────────────────────────────────────── */
+.mat-mdc-paginator { background-color: #0f2140 !important; color: #93c5fd !important; }
+.mat-mdc-paginator-range-label,
+.mat-mdc-paginator-page-size-label { color: #93c5fd !important; }
+
+/* ── Form fields outlined ──────────────────────────────────── */
+.mdc-text-field--outlined .mdc-notched-outline__leading,
+.mdc-text-field--outlined .mdc-notched-outline__notch,
+.mdc-text-field--outlined .mdc-notched-outline__trailing {
+  border-color: rgba(59,130,246,0.3) !important;
+}
+.mdc-text-field--outlined:not(.mdc-text-field--disabled):hover
+  .mdc-notched-outline__leading,
+.mdc-text-field--outlined:not(.mdc-text-field--disabled):hover
+  .mdc-notched-outline__notch,
+.mdc-text-field--outlined:not(.mdc-text-field--disabled):hover
+  .mdc-notched-outline__trailing {
+  border-color: rgba(59,130,246,0.6) !important;
+}
+.mdc-text-field--outlined .mdc-text-field__input { color: #e2e8f0 !important; }
+.mdc-floating-label { color: #7ba7d8 !important; }
+
+.mat-mdc-form-field .mdc-notched-outline__notch  { border-left: 0 !important; border-right: 0 !important; }
+.mat-mdc-form-field .mdc-notched-outline__leading,
+.mat-mdc-form-field .mdc-notched-outline__trailing { border-radius: 8px !important; }
+
+/* ── Select trigger text ───────────────────────────────────── */
+.mat-mdc-select-value,
+.mat-mdc-select-placeholder { color: #e2e8f0 !important; }
+.mat-mdc-select-arrow       { color: #7ba7d8 !important; }
+
+/* ── Chips ─────────────────────────────────────────────────── */
+.mat-mdc-chip.mat-mdc-standard-chip { background-color: rgba(59,130,246,0.15) !important; color: #93c5fd !important; }
+
+/* ── Nav list items (sidenav) ──────────────────────────────── */
+.mat-mdc-nav-list .mat-mdc-list-item { color: rgba(147,197,253,0.6) !important; }
+.mat-mdc-nav-list .mat-mdc-list-item:hover { background-color: rgba(59,130,246,0.1) !important; }
+
+/* ── Progress spinner ──────────────────────────────────────── */
+.mdc-circular-progress__indeterminate-track { stroke: rgba(59,130,246,0.15) !important; }
+
+/* ── Garantía de fondos oscuros independiente de Tailwind ──── */
+/* Todas las cards/paneles dentro del contenido principal */
+.mat-sidenav-content .rounded-3xl,
+.mat-sidenav-content .rounded-2xl,
+.mat-sidenav-content .rounded-xl {
+  background-color: #0f2140;
+  color: #e2e8f0;
+}
+/* Excepciones: overlays y modales siguen siendo transparentes */
+.mat-sidenav-content .fixed,
+.mat-sidenav-content .fixed .rounded-3xl,
+.mat-sidenav-content .fixed .rounded-2xl {
+  background-color: transparent;
+}
+/* Cards de formularios en modales */
+.mat-sidenav-content .fixed mat-card,
+.mat-sidenav-content .fixed .mat-mdc-card {
+  background-color: #0f2140 !important;
+}
+
+/* ── Tables (plain HTML tables, not mat-table) ─────────────── */
+table {
+  background-color: transparent !important;
+  color: #e2e8f0 !important;
+}
+thead {
+  background-color: #07111e !important;
+  color: #93c5fd !important;
+}
+thead th {
+  color: #93c5fd !important;
+}
+tbody tr {
+  color: #e2e8f0 !important;
+}
+tbody tr:hover {
+  background-color: rgba(59,130,246,0.07) !important;
+}
+td, th {
+  color: #e2e8f0 !important;
+  border-color: rgba(59,130,246,0.12) !important;
+}
+
+/* ── Generic dark containers ───────────────────────────────── */
+.rounded-3xl,
+.rounded-2xl,
+.rounded-xl {
+  color: #e2e8f0;
+}
+
+/* ── Input text ────────────────────────────────────────────── */
+input, textarea, select {
+  color: #e2e8f0 !important;
+  background-color: transparent;
+}
+input::placeholder, textarea::placeholder { color: #4b6fa8 !important; }
+
+/* ── Scrollbar ─────────────────────────────────────────────── */
+::-webkit-scrollbar       { width: 6px; height: 6px; }
+::-webkit-scrollbar-track  { background: #081726; }
+::-webkit-scrollbar-thumb  { background: rgba(59,130,246,0.35); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: rgba(59,130,246,0.6); }
+
+/* ── TipTap / ProseMirror ──────────────────────────────────── */
+.tiptap-editor .ProseMirror {
+  outline: none; min-height: 400px; padding: 1.5rem;
+  font-size: 1rem; line-height: 1.75;
+  color: #e2e8f0; background-color: #0f2140;
+}
+.tiptap-editor .ProseMirror p.is-editor-empty:first-child::before {
+  content: attr(data-placeholder); float: left; color: #4b6fa8; pointer-events: none; height: 0;
+}
+.tiptap-editor .ProseMirror h1 { font-size: 1.75rem; font-weight: 700; margin: 1rem 0 .5rem; color: #e2e8f0; }
+.tiptap-editor .ProseMirror h2 { font-size: 1.4rem;  font-weight: 700; margin: 1rem 0 .5rem; color: #e2e8f0; }
+.tiptap-editor .ProseMirror h3 { font-size: 1.15rem; font-weight: 600; margin: .75rem 0 .5rem; color: #e2e8f0; }
+.tiptap-editor .ProseMirror ul { list-style: disc;    padding-left: 1.5rem; }
+.tiptap-editor .ProseMirror ol { list-style: decimal; padding-left: 1.5rem; }
+.tiptap-editor .ProseMirror blockquote { border-left: 3px solid #3b82f6; padding-left: 1rem; color: #93c5fd; margin: .5rem 0; }
+.tiptap-editor .ProseMirror code { background: #112244; border-radius: 4px; padding: .1em .3em; font-size: .9em; color: #93c5fd; }
+.tiptap-editor .ProseMirror strong { font-weight: 700; }
+.tiptap-editor .ProseMirror em { font-style: italic; }
+.tiptap-editor .ProseMirror table { border-collapse: collapse; }
+.tiptap-editor .ProseMirror table td,
+.tiptap-editor .ProseMirror table th { border: 1px solid #1e3a5f; padding: 3px 8px; vertical-align: top; position: relative; }
+.tiptap-editor .ProseMirror table .selectedCell:after {
+  background: rgba(59,130,246,.15); content: ''; left:0; right:0; top:0; bottom:0; pointer-events:none; position:absolute;
+}
+.tiptap-editor .ProseMirror .tableWrapper { overflow-x: auto; }
+
+/* Collab toolbar */
+.toolbar-btn {
+  @apply flex items-center justify-center rounded-lg p-1.5 text-blue-300 transition hover:bg-blue-800/40 active:scale-95;
+}
+.export-btn {
+  @apply flex items-center gap-1 rounded-xl px-3 py-1.5 text-xs font-semibold text-white shadow-sm transition active:scale-95 disabled:opacity-50;
+}

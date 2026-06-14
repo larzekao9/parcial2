@@ -1,0 +1,260 @@
+﻿import { Component, inject, OnInit, signal } from '@angular/core';
+import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
+import { MatCardModule } from '@angular/material/card';
+import { MatButtonModule } from '@angular/material/button';
+import { MatIconModule } from '@angular/material/icon';
+import { MatFormFieldModule } from '@angular/material/form-field';
+import { MatInputModule } from '@angular/material/input';
+import { MatSelectModule } from '@angular/material/select';
+import { MatProgressSpinnerModule } from '@angular/material/progress-spinner';
+import { MatSnackBar, MatSnackBarModule } from '@angular/material/snack-bar';
+import { ApiService } from '../../core/services/api.service';
+import { AuthService } from '../../core/services/auth.service';
+
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  role: string;
+  companyId?: string;
+  departmentId?: string;
+  jobRoleId?: string;
+}
+
+interface Company {
+  id: string;
+  name: string;
+}
+
+interface Department {
+  id: string;
+  companyId: string;
+  name: string;
+}
+
+interface JobRole {
+  id: string;
+  companyId: string;
+  departmentId: string;
+  name: string;
+}
+
+@Component({
+  selector: 'app-user-list',
+  standalone: true,
+  imports: [
+    CommonModule, FormsModule,
+    MatCardModule, MatButtonModule, MatIconModule, MatFormFieldModule,
+    MatInputModule, MatSelectModule,
+    MatProgressSpinnerModule, MatSnackBarModule
+  ],
+  template: `
+    <div class="mx-auto flex w-full max-w-[1400px] flex-col gap-6 px-6 py-6">
+      <div class="flex flex-wrap items-center justify-between gap-3">
+        <h2 class="text-3xl font-bold text-white">Usuarios</h2>
+        <button mat-flat-button color="primary" (click)="openCreate()">
+          <mat-icon>person_add</mat-icon> Nuevo Usuario
+        </button>
+      </div>
+
+      @if (loading()) {
+        <div class="flex justify-center py-16"><mat-spinner /></div>
+      } @else {
+        <div class="overflow-hidden rounded-3xl bg-blue-950 shadow-sm">
+          <div class="overflow-x-auto">
+            <table class="min-w-full text-sm">
+              <thead class="bg-[#081726] text-left text-xs font-semibold uppercase tracking-wide text-blue-300/70">
+                <tr><th class="px-4 py-3">Nombre</th><th class="px-4 py-3">Email</th><th class="px-4 py-3">Cargo</th><th class="px-4 py-3">Departamento</th><th class="px-4 py-3">Acciones</th></tr>
+              </thead>
+              <tbody>
+                @for (u of users(); track u.id) {
+                  <tr class="border-t border-blue-900/30">
+                    <td class="px-4 py-3">{{ u.name }}</td>
+                    <td class="px-4 py-3">{{ u.email }}</td>
+                    <td class="px-4 py-3">{{ jobRoleName(u.jobRoleId) }}</td>
+                    <td class="px-4 py-3">{{ departmentName(u.departmentId) }}</td>
+                    <td class="px-4 py-3 flex items-center">
+                      <button mat-icon-button (click)="openEdit(u)"><mat-icon>edit</mat-icon></button>
+                      <button mat-icon-button color="warn" (click)="delete(u.id, u.name)"><mat-icon>delete</mat-icon></button>
+                    </td>
+                  </tr>
+                }
+                @empty {
+                  <tr><td colspan="6" class="px-4 py-10 text-center text-blue-300/50">No hay usuarios</td></tr>
+                }
+              </tbody>
+            </table>
+          </div>
+        </div>
+      }
+
+      @if (showForm()) {
+        <div class="fixed inset-0 z-[1000] flex items-center justify-center bg-black/70 px-4" (click)="showForm.set(false)">
+          <mat-card class="w-full max-w-lg rounded-3xl p-6 shadow-2xl" (click)="$event.stopPropagation()">
+            <h3 class="mb-4 text-xl font-semibold text-white">{{ editId() ? 'Editar' : 'Nuevo' }} Usuario</h3>
+            <mat-form-field appearance="outline" class="w-full">
+              <mat-label>Nombre</mat-label>
+              <input matInput [(ngModel)]="form.name">
+            </mat-form-field>
+            <mat-form-field appearance="outline" class="w-full">
+              <mat-label>Email</mat-label>
+              <input matInput type="email" [(ngModel)]="form.email">
+            </mat-form-field>
+            @if (!editId()) {
+              <mat-form-field appearance="outline" class="w-full">
+                <mat-label>Contraseña</mat-label>
+                <input matInput type="password" [(ngModel)]="form.password">
+              </mat-form-field>
+            }
+            @if (auth.isSuperAdmin()) {
+            } @else {
+            }
+            <mat-form-field appearance="outline" class="w-full">
+              <mat-label>Departamento</mat-label>
+              <mat-select [(ngModel)]="form.departmentId" (ngModelChange)="onDepartmentChange()">
+                <mat-option value="">Sin departamento</mat-option>
+                @for (department of availableDepartments(); track department.id) {
+                  <mat-option [value]="department.id">{{ department.name }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            <mat-form-field appearance="outline" class="w-full">
+              <mat-label>Cargo</mat-label>
+              <mat-select [(ngModel)]="form.jobRoleId" [disabled]="availableJobRoles().length === 0">
+                <mat-option value="">Sin cargo</mat-option>
+                @for (jr of availableJobRoles(); track jr.id) {
+                  <mat-option [value]="jr.id">{{ jr.name }}</mat-option>
+                }
+              </mat-select>
+            </mat-form-field>
+            <div class="mt-4 flex justify-end gap-2">
+              <button mat-button (click)="showForm.set(false)">Cancelar</button>
+              <button mat-flat-button color="primary" (click)="save()">Guardar</button>
+            </div>
+          </mat-card>
+        </div>
+      }
+    </div>
+  `
+})
+export class UserListComponent implements OnInit {
+  private api = inject(ApiService);
+  private snack = inject(MatSnackBar);
+  auth = inject(AuthService);
+
+  users = signal<User[]>([]);
+  departments = signal<Department[]>([]);
+  jobRoles = signal<JobRole[]>([]);
+  loading = signal(true);
+  showForm = signal(false);
+  editId = signal<string | null>(null);
+  form = { name: '', email: '', password: '', companyId: '', departmentId: '', jobRoleId: '' };
+
+  ngOnInit() { this.load(); }
+
+  load() {
+    this.api.get<Department[]>('/departments').subscribe({
+      next: departments => this.departments.set(departments)
+    });
+    this.loadJobRoles();
+    this.api.get<User[]>('/users').subscribe({
+      next: users => { this.users.set(users); this.loading.set(false); },
+      error: () => this.loading.set(false)
+    });
+  }
+
+  departmentName(departmentId?: string) {
+    if (!departmentId) return '-';
+    return this.departments().find(department => department.id === departmentId)?.name || departmentId;
+  }
+
+  availableDepartments() {
+    if (!this.form.companyId) return [];
+    return this.departments()
+      .filter(department => department.companyId === this.form.companyId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  availableJobRoles() {
+    if (!this.form.departmentId) return [];
+    return this.jobRoles()
+      .filter(jr => jr.departmentId === this.form.departmentId)
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  jobRoleName(id?: string) {
+    if (!id) return '-';
+    return this.jobRoles().find(jr => jr.id === id)?.name || '-';
+  }
+
+  onCompanyChange() {
+    this.form.departmentId = '';
+    this.form.jobRoleId = '';
+  }
+
+  onDepartmentChange() {
+    this.form.jobRoleId = '';
+  }
+
+  openCreate() {
+    this.editId.set(null);
+    this.form = {
+      name: '',
+      email: '',
+      password: '',
+      companyId: this.auth.user()?.companyId || this.companies()[0]?.id || '',
+      departmentId: '',
+      jobRoleId: ''
+    };
+    this.showForm.set(true);
+  }
+
+  openEdit(user: User) {
+    this.editId.set(user.id);
+    this.form = {
+      name: user.name,
+      email: user.email,
+      password: '',
+      companyId: this.auth.user()?.companyId || user.companyId || '',
+      departmentId: user.departmentId || '',
+      jobRoleId: user.jobRoleId || ''
+    };
+    this.showForm.set(true);
+  }
+
+  private loadJobRoles() {
+    this.api.get<JobRole[]>('/job-roles').subscribe({
+      next: jobRoles => this.jobRoles.set(jobRoles),
+      error: () => this.jobRoles.set([])
+    });
+  }
+
+  save() {
+    const body: Record<string, unknown> = {
+      name: this.form.name,
+      email: this.form.email,
+      companyId: this.form.companyId,
+      departmentId: this.form.departmentId || null,
+      jobRoleId: this.form.jobRoleId || null
+    };
+    if (!this.editId() && this.form.password) body['password'] = this.form.password;
+    const request = this.editId() ? this.api.patch(`/users/${this.editId()}`, body) : this.api.post('/users', body);
+    request.subscribe({
+      next: () => { this.showForm.set(false); this.load(); this.snack.open('Guardado', '', { duration: 2000 }); },
+      error: (err) => this.snack.open(err.error?.message || 'Error', '', { duration: 3000 })
+    });
+  }
+
+  delete(id: string, name: string) {
+    if (!confirm(`¿Eliminar al usuario "${name}"? Esta acción no se puede deshacer.`)) return;
+    this.api.delete(`/users/${id}`).subscribe({
+      next: () => { this.load(); this.snack.open('Usuario eliminado', '', { duration: 2000 }); },
+      error: (err) => this.snack.open(err.error?.message || 'Error al eliminar', '', { duration: 3000 })
+    });
+  }
+}
+
+
+
+

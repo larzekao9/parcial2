@@ -1,0 +1,10 @@
+target/
+*.jar
+*.war
+*.class
+.env
+.env.*
+!.env.example
+*.log
+.idea/
+*.iml
