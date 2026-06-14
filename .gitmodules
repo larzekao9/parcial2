@@ -1,9 +1,0 @@
-[submodule "backend"]
-	path = backend
-	url = https://github.com/JulioCesarTA/sw1backend.git
-	branch = main
-
-[submodule "frontend"]
-	path = frontend
-	url = https://github.com/JulioCesarTA/sw1frontend.git
-	branch = main
